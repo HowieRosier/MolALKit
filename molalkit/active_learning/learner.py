@@ -34,6 +34,8 @@ class ActiveLearningResult:
         self.acquisition_forget = []
         self.uidx_after = []
         self.performance = dict()
+        # Generic loss statistics (always available when training occurs)
+        self.loss_stats = dict()
 
 
 class ActiveLearningTrajectory:
@@ -153,6 +155,14 @@ class ActiveLearner:
         for i, id2datapoint in enumerate(self.id2datapoints):
             self.datasets_train[i] = get_subset_from_uidx(self.datasets_train[i], id2datapoint, alr.uidx_after)
             self.datasets_pool[i] = get_subset_from_uidx(self.datasets_pool[i], id2datapoint, uidx_pool)
+        # Collect per-iteration loss statistics immediately after (re)training (selector only)
+        try:
+            if hasattr(self.models[0], 'get_cbp_stats'):
+                stats = self.models[0].get_cbp_stats()
+                if stats:
+                    alr.loss_stats = stats
+        except Exception:
+            pass
         # set the model unfitted because new data is added.
         self.model_fitted = False
         self.current_iter += 1
@@ -179,6 +189,14 @@ class ActiveLearner:
         for i, id2datapoint in enumerate(self.id2datapoints):
             self.datasets_train[i] = get_subset_from_uidx(self.datasets_train[i], id2datapoint, alr.uidx_after)
             self.datasets_pool[i] = get_subset_from_uidx(self.datasets_pool[i], id2datapoint, uidx_pool)
+        # Collect per-iteration loss statistics after (re)training (selector only)
+        try:
+            if hasattr(self.models[0], 'get_cbp_stats'):
+                stats = self.models[0].get_cbp_stats()
+                if stats:
+                    alr.loss_stats = stats
+        except Exception:
+            pass
         # set the model unfitted because new data is added.
         self.model_fitted = False
         self.current_iter += 1
@@ -204,7 +222,24 @@ class ActiveLearner:
                 for metric in self.metrics:
                     metric_value = eval_metric_func(self.datasets_val[i].y.ravel(), y_pred, metric=metric)
                     alr.performance[f"{metric}-model_{i}"] = metric_value
+                # Collect loss statistics from selector (available regardless of CBP)
+                if i == 0 and hasattr(model, 'get_cbp_stats'):
+                    stats = model.get_cbp_stats()
+                    if stats:
+                        alr.loss_stats = stats
+                        if 'final_loss' in stats:
+                            print(f'Loss Stats - Final loss: {stats.get("final_loss", "N/A")}')
             self.model_fitted = True
+
+        # Always try to collect loss stats for selector, even when metrics is None
+        try:
+            model = self.models[0]
+            if hasattr(model, 'get_cbp_stats'):
+                stats = model.get_cbp_stats()
+                if stats:
+                    alr.loss_stats = stats
+        except Exception:
+            pass
         # evaluate the percentage of top data selected in the training set
         if self.top_uidx is not None:
             alr.performance["top_score"] = self.get_top_score(self.datasets_train[0], self.top_uidx)
@@ -212,6 +247,62 @@ class ActiveLearner:
     def write_traj(self):
         df_traj = pd.DataFrame(self.active_learning_traj.get_results())
         df_traj.to_csv(os.path.join(self.save_dir, "al_traj.csv"), index=False)
+        # Write a lightweight iteration summary for quick reading/plotting
+        try:
+            # Collect final_loss per AL iteration from loss_stats if available
+            final_losses = []
+            for alr in self.active_learning_traj.results:
+                stats = getattr(alr, 'loss_stats', None)
+                final_losses.append(stats.get('final_loss') if isinstance(stats, dict) else None)
+            lite = pd.DataFrame({
+                "n_iter": df_traj.get("n_iter", []),
+                # train_size = len(uidx_after) per iteration
+                "train_size": df_traj.get("uidx_after", []).apply(lambda s: len(json.loads(s)) if isinstance(s, str) else None),
+                "selected_count": df_traj.get("uidx_select", []).apply(lambda s: len(json.loads(s)) if isinstance(s, str) else 0),
+                "forgot_count": df_traj.get("uidx_forget", []).apply(lambda s: len(json.loads(s)) if isinstance(s, str) else 0),
+                # Optional columns may not exist depending on task
+                "top_score": df_traj.get("top_score", None),
+                # Final training loss of this AL iteration (last epoch's average loss)
+                "final_loss": final_losses,
+            })
+            lite.to_csv(os.path.join(self.save_dir, "al_traj_light.csv"), index=False)
+        except Exception:
+            pass
+        
+        # Write aggregated loss statistics
+        self.write_loss_stats()
+    
+    def write_loss_stats(self):
+        """Write aggregated loss statistics to a separate JSON file (always)."""
+        try:
+            stats_list = []
+            for alr in self.active_learning_traj.results:
+                stats = getattr(alr, 'loss_stats', None)
+                if stats:
+                    stats_list.append({
+                        'iteration': alr.n_iter,
+                        **stats
+                    })
+
+            path = os.path.join(self.save_dir, 'loss_stats.json')
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r') as f:
+                        old = json.load(f)
+                except Exception:
+                    old = []
+            else:
+                old = []
+            # Merge by iteration (last write wins)
+            merged = {d['iteration']: d for d in old if isinstance(d, dict) and 'iteration' in d}
+            for d in stats_list:
+                merged[d['iteration']] = d
+            merged_list = [merged[k] for k in sorted(merged.keys())]
+            if merged_list:
+                with open(path, 'w') as f:
+                    json.dump(merged_list, f, indent=2)
+        except Exception:
+            pass
 
     @staticmethod
     def get_top_score(dataset, top_uidx) -> float:

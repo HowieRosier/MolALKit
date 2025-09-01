@@ -295,6 +295,25 @@ class ModelArgs(Tap):
     model_configs: List[str]
     """ A list of config files contain all information of the machine learning model for performance evaluation.
         The first one will be used as the selector model, and the rest will be used as evaluators."""
+    
+    # L2 (weight decay)
+    weight_decay: float = 0.0
+    """L2 penalty (weight decay) for optimizer."""
+
+    perturb_sigma: float = 0.0
+    """Standard deviation of Gaussian noise for perturbation (N(0, sigma^2))."""
+
+    # CBP (Continual Backpropagation) parameters
+    cbp: bool = False
+    """Enable Continual Backpropagation for neural plasticity"""
+    maturity_threshold: int = 20
+    """Number of training steps before a neuron is considered mature enough for replacement"""
+    replacement_rate: float = 1e-4
+    """Fraction of neurons to replace at each replacement step"""
+    decay_rate: float = 0.99
+    """Decay rate for neuron utility tracking"""
+    util_type: str = 'contribution'
+    """Utility calculation method: 'contribution', 'magnitude', or 'hybrid'"""
 
     @property
     def model_configs_dict(self) -> List[Dict]:
@@ -342,7 +361,16 @@ class DatasetModelArgs(DatasetArgs, ModelArgs):
                 kernel=self.kernels[i],
                 n_jobs=self.n_jobs,
                 seed=self.seed,
-                logger=self.logger
+                logger=self.logger,
+                # L2 weight decay
+                weight_decay=self.weight_decay,
+                perturb_sigma=self.perturb_sigma,
+                # Pass CBP parameters - prioritize config file values, then command line args
+                cbp=model_config.get('cbp', self.cbp),
+                maturity_threshold=model_config.get('maturity_threshold', self.maturity_threshold),
+                replacement_rate=model_config.get('replacement_rate', self.replacement_rate),
+                decay_rate=model_config.get('decay_rate', self.decay_rate),
+                util_type=model_config.get('util_type', self.util_type)
             ) for i, model_config in enumerate(self.model_configs_dict)]
         return self._models
 

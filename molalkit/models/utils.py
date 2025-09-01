@@ -67,6 +67,15 @@ def get_model(data_format: Literal["mgktools", "chemprop", "graphgps"],
               uncertainty_dropout_p: float = 0.1,
               dropout_sampling_size: int = 10,
               continuous_fit: bool = False,
+              # L2 regularization
+              weight_decay: float = 0.0,
+              perturb_sigma: float = 0.0,
+              # CBP (Continual Backpropagation) parameters
+              cbp: bool = False,
+              maturity_threshold: int = 20,
+              replacement_rate: float = 1e-4,
+              decay_rate: float = 0.99,
+              util_type: str = 'contribution',
               # graphgps arguments
               cfg_path: str = None,
               # MolFormer arguments
@@ -214,9 +223,17 @@ def get_model(data_format: Literal["mgktools", "chemprop", "graphgps"],
                     uncertainty_method=uncertainty_method,
                     uncertainty_dropout_p=uncertainty_dropout_p,
                     dropout_sampling_size=dropout_sampling_size,
+                    weight_decay=weight_decay,
+                    perturb_sigma=perturb_sigma,
                     n_jobs=n_jobs,
                     seed=seed,
                     continuous_fit=continuous_fit,
+                    # CBP parameters
+                    cbp=cbp,
+                    maturity_threshold=maturity_threshold,
+                    replacement_rate=replacement_rate,
+                    decay_rate=decay_rate,
+                    util_type=util_type,
                     logger=logger or EmptyLogger())
     elif data_format == "graphgps":
         from molalkit.models.graphgps.graphgps import GraphGPS

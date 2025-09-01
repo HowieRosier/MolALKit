@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import os
+import json
 from typing import List, Literal
 from tqdm import trange
 from logging import Logger
@@ -13,6 +14,7 @@ from chemprop.nn_utils import param_count, param_count_all
 from chemprop.models import MoleculeModel
 from chemprop.train.loss_functions import get_loss_func
 from chemprop.train import train
+from chemprop.train.cbp_trainer import ContinualBackpropTrainer
 from chemprop.args import TrainArgs, PredictArgs
 from chemprop.train.make_predictions import set_features, predict_and_save
 from molalkit.data.utils import get_subset_from_idx
@@ -59,7 +61,18 @@ class MPNN:
                  dropout_sampling_size: int = 10,
                  # other parameters
                  continuous_fit: bool = False,
+                 # L2 (weight decay)
+                 weight_decay: float = 0.0,
+                 perturb_sigma: float = 0.0,
+                 # CBP (Continual Backpropagation) parameters
+                 cbp: bool = False,
+                 maturity_threshold: int = 20,
+                 replacement_rate: float = 1e-4,
+                 decay_rate: float = 0.99,
+                 util_type: str = 'contribution',
                  logger: Logger = None,
+                 # logging controls
+                 log_iter_loss: bool = False,
                  ):
         args = TrainArgs()
         args.save_dir = save_dir
@@ -94,6 +107,14 @@ class MPNN:
         args.mpn_path = mpn_path
         args.freeze_mpn = freeze_mpn
         args.seed = seed
+        # L2 regularization
+        args.weight_decay = weight_decay
+        # Set CBP parameters
+        args.cbp = cbp
+        args.maturity_threshold = maturity_threshold
+        args.replacement_rate = replacement_rate
+        args.decay_rate = decay_rate
+        args.util_type = util_type
         args.process_args()
         args.task_names = get_task_names(path=args.data_path, smiles_columns=args.smiles_columns,
                                          target_columns=args.target_columns, ignore_columns=args.ignore_columns)
@@ -101,6 +122,17 @@ class MPNN:
         self.chemprop_train_args = args
         self.continuous_fit = continuous_fit
         self.logger = logger
+        # SnP: perturb noise std; shrink comes from weight_decay
+        self.perturb_sigma = perturb_sigma
+        # Initialize CBP statistics tracking
+        self.cbp_stats = {}
+        # Enable per-iteration loss logging via ChemProp if requested
+        if log_iter_loss:
+            try:
+                # Log every batch inside chemprop train loop
+                args.log_frequency = 1
+            except Exception:
+                pass
         args_predict = PredictArgs()
         args_predict.uncertainty_method = uncertainty_method
         args_predict.uncertainty_dropout_p = uncertainty_dropout_p
@@ -198,16 +230,61 @@ class MPNN:
                 debug(f"Total number of parameters = {param_count_all(model):,}")
             else:
                 debug(f"Number of parameters = {param_count_all(model):,}")
-            # Optimizers
+            
+            # Log CBP configuration if enabled
+            if args.cbp:
+                debug(f"CBP is enabled for training")
+                debug(f"  Maturity threshold: {args.maturity_threshold}")
+                debug(f"  Replacement rate: {args.replacement_rate}")
+                debug(f"  Decay rate: {args.decay_rate}")
+                debug(f"  Utility type: {args.util_type}")
+            
+            # Optimizers - ChemProp's train function will handle CBP internally
             optimizer = build_optimizer(model, args)
+            
+            # Create CBP trainer if CBP is enabled
+            cbp_trainer = None
+            if args.cbp:
+                # Create CBP log directory
+                cbp_log_dir = os.path.join(save_dir, 'cbp_logs')
+                cbp_trainer = ContinualBackpropTrainer(
+                    model=model,
+                    args=args,
+                    step_size=args.init_lr,
+                    replacement_rate=args.replacement_rate,
+                    decay_rate=args.decay_rate,
+                    maturity_threshold=args.maturity_threshold,
+                    util_type=args.util_type,
+                    enable_cbp_logging=True,
+                    log_dir=cbp_log_dir
+                )
+                debug(f"CBP trainer initialized with log directory: {cbp_log_dir}")
 
             # Learning rate schedulers
             scheduler = build_lr_scheduler(optimizer, args)
 
+            # If SnP enabled, wrap optimizer.step to add Gaussian noise post-update
+            if self.perturb_sigma > 0.0:
+                orig_step = optimizer.step
+                sigma = float(self.perturb_sigma)
+                def snp_step(*step_args, **step_kwargs):
+                    loss = orig_step(*step_args, **step_kwargs)
+                    try:
+                        with torch.no_grad():
+                            for p in model.parameters():
+                                if p.requires_grad and p.data is not None:
+                                    p.add_(torch.randn_like(p) * sigma)
+                    except Exception:
+                        pass
+                    return loss
+                optimizer.step = snp_step  # type: ignore
+
             n_iter = 0
+            epoch_losses = []  # Track epoch losses for CBP stats
+            
             for epoch in trange(args.epochs):
                 debug(f"Epoch {epoch}")
-                n_iter = train(
+                result = train(
                     model=model,
                     data_loader=train_data_loader,
                     loss_func=loss_func,
@@ -216,8 +293,25 @@ class MPNN:
                     args=args,
                     n_iter=n_iter,
                     logger=logger,
-                    writer=writer
+                    writer=writer,
+                    cbp_trainer=cbp_trainer  # Pass CBP trainer if created
                 )
+                
+                # Handle both old format (int) and new format (tuple)
+                if isinstance(result, tuple):
+                    n_iter, epoch_loss = result
+                    epoch_losses.append(epoch_loss)
+                    try:
+                        debug(f"Epoch {epoch} average loss = {epoch_loss:.6f}")
+                    except Exception:
+                        pass
+                else:
+                    n_iter = result
+                    
+                # Log CBP epoch statistics if CBP is enabled
+                if cbp_trainer and hasattr(cbp_trainer, 'log_epoch_cbp_stats'):
+                    cbp_trainer.log_epoch_cbp_stats(epoch)
+                    
                 if isinstance(scheduler, ExponentialLR):
                     scheduler.step()
             if len(self.models) < args.ensemble_size:
@@ -225,6 +319,38 @@ class MPNN:
                 self.models.append(model)
 
             self.scalers.append((scaler, features_scaler, None, None))
+            
+            # Store training statistics
+            if epoch_losses:
+                self.cbp_stats['epoch_losses'] = epoch_losses
+                self.cbp_stats['final_loss'] = epoch_losses[-1] if epoch_losses else None
+                
+                if args.cbp:
+                    self.cbp_stats['cbp_enabled'] = True
+                    self.cbp_stats['iteration'] = iteration
+                    debug(f"Training completed for model {model_idx} with CBP enabled")
+                    debug(f"  Final loss: {epoch_losses[-1] if epoch_losses else 'N/A'}")
+                    
+                    # Save CBP summary
+                    if cbp_trainer and hasattr(cbp_trainer, 'cbp_logger') and cbp_trainer.cbp_logger:
+                        cbp_trainer.cbp_logger.save_summary()
+                        
+                    # Save CBP stats to JSON file
+                    cbp_stats_file = os.path.join(save_dir, 'cbp_stats.json')
+                    with open(cbp_stats_file, 'w') as f:
+                        cbp_stats_to_save = {
+                            'cbp_enabled': True,
+                            'maturity_threshold': args.maturity_threshold,
+                            'replacement_rate': args.replacement_rate,
+                            'decay_rate': args.decay_rate,
+                            'util_type': args.util_type,
+                            'iteration': iteration,
+                            'epochs': args.epochs,
+                            'final_loss': epoch_losses[-1] if epoch_losses else None,
+                            'epoch_losses': epoch_losses
+                        }
+                        json.dump(cbp_stats_to_save, f, indent=2)
+                    debug(f"CBP stats saved to: {cbp_stats_file}")
             # save the model after training
             # save_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), model, scaler,
             #                 features_scaler, None, None, args)
@@ -308,3 +434,7 @@ class MPNN:
 
     def predict_value(self, pred_data):
         return self.predict(pred_data)[0]
+    
+    def get_cbp_stats(self):
+        """Return CBP statistics collected during training"""
+        return self.cbp_stats

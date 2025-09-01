@@ -36,7 +36,11 @@ def get_kernel_from_config(model_config: Dict, dataset, kernel_pkl_path) -> Call
 def get_model_from_config(model_config: Dict, dataset, task_type, save_dir,
                           data_path, smiles_columns, targets_columns, 
                           features_generators, kernel,
-                          n_jobs, seed, logger) -> Callable:
+                          n_jobs, seed, logger,
+                          weight_decay=None,
+                          perturb_sigma: float = 0.0,
+                          cbp=None, maturity_threshold=None, replacement_rate=None,
+                          decay_rate=None, util_type=None) -> Callable:
     data_format = model_config["data_format"]
     if data_format == "mgktools":
         smiles_full = dataset.X_smiles.ravel()
@@ -95,6 +99,15 @@ def get_model_from_config(model_config: Dict, dataset, task_type, save_dir,
         uncertainty_dropout_p=model_config.get("uncertainty_dropout_p") or 0.1,
         dropout_sampling_size=model_config.get("dropout_sampling_size") or 10,
         continuous_fit=model_config.get("continuous_fit") or False,
+        # L2 weight decay - precedence: config > CLI > default 0.0
+        weight_decay=model_config.get("weight_decay", weight_decay if weight_decay is not None else 0.0),
+        perturb_sigma=model_config.get("perturb_sigma", perturb_sigma),
+        # CBP parameters - prioritize config file values, then command line args
+        cbp=model_config.get("cbp", cbp) if cbp is not None else model_config.get("cbp", False),
+        maturity_threshold=model_config.get("maturity_threshold", maturity_threshold) if maturity_threshold is not None else model_config.get("maturity_threshold", 20),
+        replacement_rate=model_config.get("replacement_rate", replacement_rate) if replacement_rate is not None else model_config.get("replacement_rate", 1e-4),
+        decay_rate=model_config.get("decay_rate", decay_rate) if decay_rate is not None else model_config.get("decay_rate", 0.99),
+        util_type=model_config.get("util_type", util_type) if util_type is not None else model_config.get("util_type", "contribution"),
         cfg_path=model_config.get("cfg"),
         pretrained_path=model_config.get("pretrained_path"),
         n_head=model_config.get("n_head") or 12,
