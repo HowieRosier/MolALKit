@@ -14,7 +14,7 @@ from chemprop.nn_utils import param_count, param_count_all
 from chemprop.models import MoleculeModel
 from chemprop.train.loss_functions import get_loss_func
 from chemprop.train import train
-from chemprop.train.cbp_trainer import ContinualBackpropTrainer
+from chemprop.models.cbp_trainer import ContinualBackpropTrainer
 from chemprop.args import TrainArgs, PredictArgs
 from chemprop.train.make_predictions import set_features, predict_and_save
 from molalkit.data.utils import get_subset_from_idx

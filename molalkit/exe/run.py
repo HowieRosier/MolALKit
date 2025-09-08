@@ -60,14 +60,21 @@ def molalkit_run(arguments=None):
                     "dataset_type": getattr(ta, "dataset_type", None),
                     "loss_function": getattr(ta, "loss_function", None),
                     "cbp_enabled": bool(getattr(ta, "cbp", False)),
+                    # L2 / noise
                     "weight_decay": getattr(ta, "weight_decay", None),
                     "perturb_sigma": getattr(selector_model, "perturb_sigma", None),
+                    # Model arch
                     "epochs": getattr(ta, "epochs", None),
                     "hidden_size": getattr(ta, "hidden_size", None),
                     "depth": getattr(ta, "depth", None),
                     "ffn_num_layers": getattr(ta, "ffn_num_layers", None),
                     "dropout": getattr(ta, "dropout", None),
                     "batch_size": getattr(ta, "batch_size", None),
+                    # CBP params (explicit in meta card)
+                    "replacement_rate": getattr(ta, "replacement_rate", None),
+                    "decay_rate": getattr(ta, "decay_rate", None),
+                    "maturity_threshold": getattr(ta, "maturity_threshold", None),
+                    "util_type": getattr(ta, "util_type", None),
                 }
 
         run_meta = {
