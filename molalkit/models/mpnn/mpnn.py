@@ -126,6 +126,8 @@ class MPNN:
         self.perturb_sigma = perturb_sigma
         # Initialize CBP statistics tracking
         self.cbp_stats = {}
+        # Initialize CBP trainers storage for continuous_fit
+        self.cbp_trainers = []  # Will store ContinualBackpropTrainer instances
         # Enable per-iteration loss logging via ChemProp if requested
         if log_iter_loss:
             try:
@@ -199,8 +201,12 @@ class MPNN:
 
         if self.continuous_fit and hasattr(self, "models"):
             assert len(self.models) == args.ensemble_size
+            # Also check CBP trainers for continuous fit
+            if args.cbp and not hasattr(self, "cbp_trainers"):
+                self.cbp_trainers = []  # Initialize if not exists
         else:
             self.models = []
+            self.cbp_trainers = []  # Reset CBP trainers when models are reset
 
         self.scalers = []
         for model_idx in range(args.ensemble_size):
@@ -239,28 +245,44 @@ class MPNN:
                 debug(f"  Decay rate: {args.decay_rate}")
                 debug(f"  Utility type: {args.util_type}")
             
-            # Optimizers - ChemProp's train function will handle CBP internally
-            optimizer = build_optimizer(model, args)
+            # Create optimizer - skip if CBP will create its own
+            optimizer = None  # Will be set based on CBP mode
             
-            # Create CBP trainer if CBP is enabled
+            # Create or reuse CBP trainer if CBP is enabled
             cbp_trainer = None
             if args.cbp:
-                # Create CBP log directory
-                cbp_log_dir = os.path.join(save_dir, 'cbp_logs')
-                cbp_trainer = ContinualBackpropTrainer(
-                    model=model,
-                    args=args,
-                    step_size=args.init_lr,
-                    replacement_rate=args.replacement_rate,
-                    decay_rate=args.decay_rate,
-                    maturity_threshold=args.maturity_threshold,
-                    util_type=args.util_type,
-                    enable_cbp_logging=True,
-                    log_dir=cbp_log_dir
-                )
-                debug(f"CBP trainer initialized with log directory: {cbp_log_dir}")
+                # Reuse existing CBP trainer in continuous_fit mode to preserve FFN ages/utils
+                if self.continuous_fit and len(self.cbp_trainers) > model_idx:
+                    cbp_trainer = self.cbp_trainers[model_idx]
+                    debug(f"Reusing existing CBP trainer for model {model_idx} (continuous_fit mode)")
+                    # Log the current FFN ages status
+                    if hasattr(cbp_trainer, 'gnt') and cbp_trainer.gnt:
+                        max_age = max(torch.max(age).item() for age in cbp_trainer.gnt.ages) if cbp_trainer.gnt.ages else 0
+                        debug(f"  FFN max age: {max_age}, maturity_threshold: {args.maturity_threshold}")
+                else:
+                    # Create new CBP trainer for first iteration or non-continuous mode
+                    cbp_log_dir = os.path.join(save_dir, 'cbp_logs')
+                    cbp_trainer = ContinualBackpropTrainer(
+                        model=model,
+                        args=args,
+                        step_size=args.init_lr,
+                        replacement_rate=args.replacement_rate,
+                        decay_rate=args.decay_rate,
+                        maturity_threshold=args.maturity_threshold,
+                        util_type=args.util_type,
+                        enable_cbp_logging=True,
+                        log_dir=cbp_log_dir
+                    )
+                    debug(f"CBP trainer initialized with log directory: {cbp_log_dir}")
+                
+                # Use CBP trainer's optimizer
+                optimizer = cbp_trainer.optimizer
+                debug(f"Using CBP trainer's optimizer")
+            else:
+                # Standard training: create optimizer normally
+                optimizer = build_optimizer(model, args)
 
-            # Learning rate schedulers
+            # Learning rate schedulers - now using the correct optimizer
             scheduler = build_lr_scheduler(optimizer, args)
 
             # If SnP enabled, wrap optimizer.step to add Gaussian noise post-update
@@ -317,6 +339,9 @@ class MPNN:
             if len(self.models) < args.ensemble_size:
                 assert len(self.models) == model_idx
                 self.models.append(model)
+                # Also store CBP trainer if CBP is enabled
+                if args.cbp and cbp_trainer:
+                    self.cbp_trainers.append(cbp_trainer)
 
             self.scalers.append((scaler, features_scaler, None, None))
             
