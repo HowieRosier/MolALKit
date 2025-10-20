@@ -1,33 +1,33 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import os
-from typing import Dict, Iterator, List, Optional, Union, Literal, Tuple
+import json
+from typing import List, Literal
 from tqdm import trange
 from logging import Logger
 import numpy as np
 import torch
-from tensorboardX import SummaryWriter
 from torch.optim.lr_scheduler import ExponentialLR
-from chemprop.data import get_class_sizes, get_data, MoleculeDataLoader, MoleculeDataset, set_cache_graph, split_data, \
-    get_task_names
-from chemprop.utils import build_optimizer, build_lr_scheduler, load_checkpoint, makedirs, \
-    save_checkpoint, save_smiles_splits, load_frzn_model, multitask_mean
+from chemprop.data import get_class_sizes, MoleculeDataLoader, get_task_names
+from chemprop.utils import build_optimizer, build_lr_scheduler, makedirs, load_mpn_model
 from chemprop.nn_utils import param_count, param_count_all
 from chemprop.models import MoleculeModel
-from chemprop.constants import MODEL_FILE_NAME
 from chemprop.train.loss_functions import get_loss_func
 from chemprop.train import train
-from chemprop.train.predict import predict
-from .args import TrainArgs
+from chemprop.models.cbp_trainer import ContinualBackpropTrainer
+from chemprop.args import TrainArgs, PredictArgs
+from chemprop.train.make_predictions import set_features, predict_and_save
+from molalkit.data.utils import get_subset_from_idx
 
 
 class MPNN:
     def __init__(self,
-                 save_dir: str,
-                 dataset_type: Literal['regression', 'classification', 'multiclass', 'spectra'],
-                 loss_function: Literal['mse', 'bounded_mse', 'binary_cross_entropy', 'cross_entropy', 'mcc', 'sid',
-                                        'wasserstein', 'mve', 'evidential', 'dirichlet'],
-                 num_tasks: int = 1,
+                 # TrainArgs parameters
+                 save_dir: str, data_path: str,
+                 dataset_type: Literal["regression", "classification", "multiclass", "spectra"],
+                 loss_function: Literal["mse", "bounded_mse", "binary_cross_entropy", "cross_entropy", "mcc", "sid",
+                                        "wasserstein", "mve", "evidential", "dirichlet"],
+                 smiles_columns: List[str] = None, target_columns: List[str] = None,
                  multiclass_num_classes: int = 3,
                  features_generator=None,
                  no_features_scaling: bool = False,
@@ -51,39 +51,36 @@ class MPNN:
                  checkpoint_frzn: str = None,
                  frzn_ffn_layers: int = 0,
                  freeze_first_only: bool = False,
+                 mpn_path: str = None,
+                 freeze_mpn: bool = False,
                  seed: int = 0,
+                 # PredictArgs parameters
+                 uncertainty_method: Literal["mve", "ensemble", "evidential_epistemic", "evidential_aleatoric",
+                                             "evidential_total", "classification", "dropout", "spectra_roundrobin"] = None,
+                 uncertainty_dropout_p: float = 0.1,
+                 dropout_sampling_size: int = 10,
+                 # other parameters
+                 continuous_fit: bool = False,
+                 # L2 (weight decay)
+                 weight_decay: float = 0.0,
+                 perturb_sigma: float = 0.0,
+                 # CBP (Continual Backpropagation) parameters
+                 cbp: bool = False,
+                 maturity_threshold: int = 20,
+                 replacement_rate: float = 1e-4,
+                 decay_rate: float = 0.99,
+                 util_type: str = 'contribution',
                  logger: Logger = None,
+                 # logging controls
+                 log_iter_loss: bool = False,
                  ):
-        """
-        args = TrainArgs(save_dir=save_dir,
-                         dataset_type=dataset_type,
-                         loss_function=loss_function,
-                         multiclass_num_classes=multiclass_num_classes,
-                         features_only=features_only,
-                         epochs=epochs,
-                         hidden_size=hidden_size,
-                         ffn_num_layers=ffn_num_layers,
-                         ffn_hidden_size=ffn_hidden_size,
-                         dropout=dropout,
-                         batch_size=batch_size,
-                         ensemble_size=ensemble_size,
-                         number_of_molecules=number_of_molecules,
-                         mpn_shared=mpn_shared,
-                         atom_messages=atom_messages,
-                         undirected=undirected,
-                         num_workers=n_jobs,
-                         class_balance=class_balance,
-                         checkpoint_dir=checkpoint_dir,
-                         checkpoint_frzn=checkpoint_frzn,
-                         frzn_ffn_layers=frzn_ffn_layers,
-                         freeze_first_only=freeze_first_only,
-                         seed=seed)
-        """
         args = TrainArgs()
         args.save_dir = save_dir
+        args.data_path = data_path
         args.dataset_type = dataset_type
         args.loss_function = loss_function
-        args.num_tasks = num_tasks
+        args.smiles_columns = smiles_columns
+        args.target_columns = target_columns
         args.multiclass_num_classes = multiclass_num_classes
         args.features_generator = features_generator
         args.no_features_scaling = no_features_scaling
@@ -107,40 +104,79 @@ class MPNN:
         args.checkpoint_frzn = checkpoint_frzn
         args.frzn_ffn_layers = frzn_ffn_layers
         args.freeze_first_only = freeze_first_only
+        args.mpn_path = mpn_path
+        args.freeze_mpn = freeze_mpn
         args.seed = seed
+        # L2 regularization
+        args.weight_decay = weight_decay
+        # Set CBP parameters
+        args.cbp = cbp
+        args.maturity_threshold = maturity_threshold
+        args.replacement_rate = replacement_rate
+        args.decay_rate = decay_rate
+        args.util_type = util_type
         args.process_args()
-        self.args = args
-        self.features_scaler = None
+        args.task_names = get_task_names(path=args.data_path, smiles_columns=args.smiles_columns,
+                                         target_columns=args.target_columns, ignore_columns=args.ignore_columns)
+        args._parsed = True
+        self.chemprop_train_args = args
+        self.continuous_fit = continuous_fit
         self.logger = logger
+        # SnP: perturb noise std; shrink comes from weight_decay
+        self.perturb_sigma = perturb_sigma
+        # Initialize CBP statistics tracking
+        self.cbp_stats = {}
+        # Storage for CBP trainers across AL iterations (for FFN CBP state persistence)
+        self.cbp_trainers = []
+        # Enable per-iteration loss logging via ChemProp if requested
+        if log_iter_loss:
+            try:
+                # Log every batch inside chemprop train loop
+                args.log_frequency = 1
+            except Exception:
+                pass
+        args_predict = PredictArgs()
+        args_predict.uncertainty_method = uncertainty_method
+        args_predict.uncertainty_dropout_p = uncertainty_dropout_p
+        args_predict.dropout_sampling_size = dropout_sampling_size
+        # args_predict.checkpoint_dir = save_dir
+        args_predict.test_path = "fake"
+        args_predict.preds_path = "fake"
+        # args_predict.process_args()
+        args_predict._parsed = True
+        args_predict.checkpoint_paths = [None] * args.ensemble_size
+        self.chemprop_predict_args = args_predict
 
-    def fit_alb(self, train_data):
-        args = self.args
+    def fit_molalkit(self, train_data, iteration: int = 0):
+        if not self.continuous_fit and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        args = self.chemprop_train_args
         args.train_data_size = len(train_data)
         logger = self.logger
         if logger is not None:
             debug, info = logger.debug, logger.info
         else:
-            debug = info = str
+            debug = info = print
 
         # Set pytorch seed for random initial weights
         torch.manual_seed(args.pytorch_seed)
 
-        if args.dataset_type == 'classification':
+        if args.dataset_type == "classification":
             train_class_sizes = get_class_sizes(train_data, proportion=False)
             args.train_class_sizes = train_class_sizes
 
         if args.features_scaling:
-            self.features_scaler = train_data.normalize_features(replace_nan_token=0)
-
-        atom_descriptor_scaler = None
-        bond_feature_scaler = None
+            features_scaler = train_data.normalize_features(
+                replace_nan_token=0)
+        else:
+            features_scaler = None
 
         args.train_data_size = len(train_data)
 
         # Initialize scaler and scale training targets by subtracting mean and dividing standard deviation (
         # regression only)
-        if args.dataset_type == 'regression':
-            debug('Fitting scaler')
+        if args.dataset_type == "regression":
+            debug("Fitting scaler")
             scaler = train_data.normalize_targets()
             args.spectra_phase_mask = None
         else:
@@ -149,15 +185,7 @@ class MPNN:
 
         # Get loss function
         loss_func = get_loss_func(args)
-        """
-        # Automatically determine whether to cache
-        if len(train_data) <= args.cache_cutoff:
-            set_cache_graph(True)
-            num_workers = 0
-        else:
-            set_cache_graph(False)
-            num_workers = args.num_workers
-        """
+
         train_data_loader = MoleculeDataLoader(
             dataset=train_data,
             batch_size=args.batch_size,
@@ -168,56 +196,153 @@ class MPNN:
         )
 
         if args.class_balance:
-            debug(f'With class_balance, effective train size = {train_data_loader.iter_size:,}')
+            debug(
+                f"With class_balance, effective train size = {train_data_loader.iter_size:,}")
 
+        if self.continuous_fit and hasattr(self, "models"):
+            assert len(self.models) == args.ensemble_size
+            # Ensure cbp_trainers list exists when continuing
+            if args.cbp and not hasattr(self, "cbp_trainers"):
+                self.cbp_trainers = []
+        else:
+            self.models = []
+            # Reset CBP trainers when models are reset
+            self.cbp_trainers = []
+
+        self.scalers = []
         for model_idx in range(args.ensemble_size):
-            # Tensorboard writer
-            save_dir = os.path.join(args.save_dir, f'model_{model_idx}')
+            save_dir = os.path.join(args.save_dir, f"model_{model_idx}")
             makedirs(save_dir)
-            #try:
-            #    writer = SummaryWriter(log_dir=save_dir)
-            #except:
-            #    writer = SummaryWriter(logdir=save_dir)
             writer = None
-            # Load/build model
-            if args.checkpoint_paths is not None:
-                debug(f'Loading model {model_idx} from {args.checkpoint_paths[model_idx]}')
-                model = load_checkpoint(args.checkpoint_paths[model_idx], logger=logger)
+            if self.continuous_fit and len(self.models) == args.ensemble_size:
+                debug(
+                    f"Loading model {model_idx} that fitted at previous iteration")
+                model = self.models[model_idx]
             else:
-                debug(f'Building model {model_idx}')
+                debug(f"Building model {model_idx} from scratch")
                 model = MoleculeModel(args)
+                if args.cuda:
+                    debug("Moving model to cuda")
+                model = model.to(args.device)
 
-            # Optionally, overwrite weights:
-            if args.checkpoint_frzn is not None:
-                debug(f'Loading and freezing parameters from {args.checkpoint_frzn}.')
-                model = load_frzn_model(model=model, path=args.checkpoint_frzn, current_args=args, logger=logger)
+            if args.mpn_path is not None:
+                debug(f"Loading MPN parameters from {args.mpn_path}.")
+                model = load_mpn_model(
+                    model=model, path=args.mpn_path, current_args=args, logger=logger)
 
             debug(model)
 
-            if args.checkpoint_frzn is not None:
-                debug(f'Number of unfrozen parameters = {param_count(model):,}')
-                debug(f'Total number of parameters = {param_count_all(model):,}')
+            if args.freeze_mpn:
+                debug(f"Number of unfrozen parameters = {param_count(model):,}")
+                debug(f"Total number of parameters = {param_count_all(model):,}")
             else:
-                debug(f'Number of parameters = {param_count_all(model):,}')
-
-            if args.cuda:
-                print('Moving model to cuda')
-            model = model.to(args.device)
-
-            # Ensure that model is saved in correct location for evaluation if 0 epochs
-            # save_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), model, scaler,
-            #                 features_scaler, atom_descriptor_scaler, bond_feature_scaler, None)
-
-            # Optimizers
-            optimizer = build_optimizer(model, args)
-
-            # Learning rate schedulers
+                debug(f"Number of parameters = {param_count_all(model):,}")
+            
+            # Log CBP configuration if enabled
+            if args.cbp:
+                debug(f"CBP is enabled for training")
+                debug(f"  Maturity threshold: {args.maturity_threshold}")
+                debug(f"  Replacement rate: {args.replacement_rate}")
+                debug(f"  Decay rate: {args.decay_rate}")
+                debug(f"  Utility type: {args.util_type}")
+            
+            # Create or reuse CBP trainer if CBP is enabled
+            cbp_trainer = None
+            if args.cbp:
+                # Reuse existing CBP trainer in continuous_fit mode to preserve FFN ages/utils
+                if self.continuous_fit and len(self.cbp_trainers) > model_idx:
+                    cbp_trainer = self.cbp_trainers[model_idx]
+                    debug(f"Reusing existing CBP trainer for model {model_idx} (continuous_fit mode)")
+                    # Optionally, report FFN max age for visibility
+                    if hasattr(cbp_trainer, 'gnt') and cbp_trainer.gnt:
+                        try:
+                            max_age = max(torch.max(age).item() for age in cbp_trainer.gnt.ages) if cbp_trainer.gnt.ages else 0
+                            debug(f"  FFN max age: {max_age}, maturity_threshold: {args.maturity_threshold}")
+                        except Exception:
+                            pass
+                else:
+                    # Create new CBP trainer for first iteration or non-continuous mode
+                    cbp_log_dir = os.path.join(save_dir, 'cbp_logs')
+                    cbp_trainer = ContinualBackpropTrainer(
+                        model=model,
+                        args=args,
+                        step_size=args.init_lr,
+                        replacement_rate=args.replacement_rate,
+                        decay_rate=args.decay_rate,
+                        maturity_threshold=args.maturity_threshold,
+                        util_type=args.util_type,
+                        enable_cbp_logging=True,
+                        log_dir=cbp_log_dir
+                    )
+                    debug(f"CBP trainer initialized with log directory: {cbp_log_dir}")
+                
+                # Use CBP trainer's optimizer
+                optimizer = cbp_trainer.optimizer
+                debug(f"Using CBP trainer's optimizer")
+            else:
+                # Standard mode: create standard optimizer
+                optimizer = build_optimizer(model, args)
+                debug(f"Using standard optimizer")
+            
+            # Learning rate scheduler [enabled by default]
             scheduler = build_lr_scheduler(optimizer, args)
+            
+            # ===== Alternative Schedulers (comment/uncomment to switch) =====
+            # 1. DummyLRScheduler: Keep LR constant throughout training
+            # class DummyLRScheduler:
+            #     def __init__(self, optimizer):
+            #         self.optimizer = optimizer
+            #     def get_lr(self):
+            #         return [group['lr'] for group in self.optimizer.param_groups]
+            #     def step(self, *args, **kwargs):
+            #         return
+            # scheduler = DummyLRScheduler(optimizer)
+            
+            # 2. HalfwayStepLRScheduler: Keep initial LR for first half of AL iterations, then drop to fine_tune_lr
+            # class HalfwayStepLRScheduler:
+            #     def __init__(self, optimizer, current_iteration, total_iterations, initial_lr=1e-4, fine_tune_lr=1e-5):
+            #         self.optimizer = optimizer
+            #         self.current_iteration = current_iteration
+            #         self.total_iterations = total_iterations
+            #         self.initial_lr = initial_lr
+            #         self.fine_tune_lr = fine_tune_lr
+            #         self.halfway_point = total_iterations // 2
+            #         # Set initial LR
+            #         if current_iteration < self.halfway_point:
+            #             target_lr = self.initial_lr
+            #         else:
+            #             target_lr = self.fine_tune_lr
+            #         for param_group in self.optimizer.param_groups:
+            #             param_group['lr'] = target_lr
+            #     def get_lr(self):
+            #         return [group['lr'] for group in self.optimizer.param_groups]
+            #     def step(self, *args, **kwargs):
+            #         return  # LR is set once at scheduler init, no per-batch update needed
+            # scheduler = HalfwayStepLRScheduler(optimizer, current_iteration=iteration, total_iterations=20, initial_lr=1e-4, fine_tune_lr=1e-5)
+            # ================================================================
+
+            # If SnP enabled, wrap optimizer.step to add Gaussian noise post-update
+            if self.perturb_sigma > 0.0:
+                orig_step = optimizer.step
+                sigma = float(self.perturb_sigma)
+                def snp_step(*step_args, **step_kwargs):
+                    loss = orig_step(*step_args, **step_kwargs)
+                    try:
+                        with torch.no_grad():
+                            for p in model.parameters():
+                                if p.requires_grad and p.data is not None:
+                                    p.add_(torch.randn_like(p) * sigma)
+                    except Exception:
+                        pass
+                    return loss
+                optimizer.step = snp_step  # type: ignore
 
             n_iter = 0
+            epoch_losses = []  # Track epoch losses for CBP stats
+            
             for epoch in trange(args.epochs):
-                debug(f'Epoch {epoch}')
-                n_iter = train(
+                debug(f"Epoch {epoch}")
+                result = train(
                     model=model,
                     data_loader=train_data_loader,
                     loss_func=loss_func,
@@ -226,65 +351,154 @@ class MPNN:
                     args=args,
                     n_iter=n_iter,
                     logger=logger,
-                    writer=writer
+                    writer=writer,
+                    cbp_trainer=cbp_trainer  # Pass CBP trainer if created
                 )
+                
+                # Handle both old format (int) and new format (tuple)
+                if isinstance(result, tuple):
+                    n_iter, epoch_loss = result
+                    epoch_losses.append(epoch_loss)
+                    try:
+                        debug(f"Epoch {epoch} average loss = {epoch_loss:.6f}")
+                    except Exception:
+                        pass
+                else:
+                    n_iter = result
+                    
+                # Log CBP epoch statistics if CBP is enabled
+                if cbp_trainer and hasattr(cbp_trainer, 'log_epoch_cbp_stats'):
+                    cbp_trainer.log_epoch_cbp_stats(epoch)
+                    
                 if isinstance(scheduler, ExponentialLR):
                     scheduler.step()
-            self.model = model
-            self.scaler = scaler
-            # save_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), model, scaler, features_scaler,
-            #                 atom_descriptor_scaler, bond_feature_scaler, None)
+            if len(self.models) < args.ensemble_size:
+                assert len(self.models) == model_idx
+                self.models.append(model)
+                # Also store CBP trainer if CBP is enabled
+                if args.cbp and cbp_trainer:
+                    # Ensure list capacity
+                    while len(self.cbp_trainers) < args.ensemble_size:
+                        self.cbp_trainers.append(None)
+                    self.cbp_trainers[model_idx] = cbp_trainer
+
+            self.scalers.append((scaler, features_scaler, None, None))
+            
+            # Store training statistics
+            if epoch_losses:
+                self.cbp_stats['epoch_losses'] = epoch_losses
+                self.cbp_stats['final_loss'] = epoch_losses[-1] if epoch_losses else None
+                
+                if args.cbp:
+                    self.cbp_stats['cbp_enabled'] = True
+                    self.cbp_stats['iteration'] = iteration
+                    debug(f"Training completed for model {model_idx} with CBP enabled")
+                    debug(f"  Final loss: {epoch_losses[-1] if epoch_losses else 'N/A'}")
+                    
+                    # Save CBP summary
+                    if cbp_trainer and hasattr(cbp_trainer, 'cbp_logger') and cbp_trainer.cbp_logger:
+                        cbp_trainer.cbp_logger.save_summary()
+                        
+                    # Save CBP stats to JSON file
+                    cbp_stats_file = os.path.join(save_dir, 'cbp_stats.json')
+                    with open(cbp_stats_file, 'w') as f:
+                        cbp_stats_to_save = {
+                            'cbp_enabled': True,
+                            'maturity_threshold': args.maturity_threshold,
+                            'replacement_rate': args.replacement_rate,
+                            'decay_rate': args.decay_rate,
+                            'util_type': args.util_type,
+                            'iteration': iteration,
+                            'epochs': args.epochs,
+                            'final_loss': epoch_losses[-1] if epoch_losses else None,
+                            'epoch_losses': epoch_losses
+                        }
+                        json.dump(cbp_stats_to_save, f, indent=2)
+                    debug(f"CBP stats saved to: {cbp_stats_file}")
+            # save the model after training
+            # save_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), model, scaler,
+            #                 features_scaler, None, None, args)
+
+    def predict(self, pred_data, batch_size: int = 10000):
+        """
+        Generate predictions for input data using trained models.
+        
+        Parameters
+        ----------
+        pred_data : MoleculeDataset
+            Dataset containing molecules to make predictions on. Must be preprocessed
+            in the same way as the training data.
+        
+        batch_size : int, optional (default=100000)
+            Number of molecules to process in each batch. Controls memory usage
+            during prediction. Larger values process data faster but require more memory.
+            
+        Returns
+        -------
+        np.ndarray
+            Array of shape (n_molecules,) containing model predictions for each molecule.
+        
+        np.ndarray
+            Array of shape (n_molecules,) containing uncertainty estimates for each prediction.
+        """
+        args = self.chemprop_predict_args
+        train_args = self.chemprop_train_args
+        num_tasks = train_args.num_tasks
+        task_names = train_args.task_names
+
+        set_features(args, train_args)
+
+        if train_args.features_scaling:
+            pred_data.normalize_features(self.scalers[0][0])
+
+        # Initialize arrays to store predictions and uncertainties
+        all_preds = []
+        all_uncs = []
+        # Calculate total number of batches
+        total_batches = (len(pred_data) + batch_size - 1) // batch_size
+        # Process data in chunks of 100,000
+        for i in range(total_batches):
+            models = (model for model in self.models)
+            scalers = (scaler for scaler in self.scalers)
+
+            start = i * batch_size
+            end = min((i + 1) * batch_size, len(pred_data))
+            test_data = get_subset_from_idx(pred_data, range(start, end))
+            test_data_loader = MoleculeDataLoader(
+                dataset=test_data,
+                batch_size=train_args.batch_size,
+                num_workers=train_args.num_workers
+            )
+            preds, unc = predict_and_save(
+                args=args,
+                train_args=train_args,
+                test_data=test_data,
+                task_names=task_names,
+                num_tasks=num_tasks,
+                test_data_loader=test_data_loader,
+                full_data=pred_data,
+                full_to_valid_indices={j: j for j in range(len(pred_data))},
+                models=models,
+                scalers=scalers,
+                num_models=len(self.models),
+                return_invalid_smiles=False,
+                save_results=False
+            )
+            all_preds += np.array(preds).ravel().tolist()
+            all_uncs += np.array(unc).ravel().tolist()
+        return np.array(all_preds), np.array(all_uncs)
 
     def predict_uncertainty(self, pred_data):
-        args = self.args
-        if args.features_scaling:
-            pred_data.normalize_features(self.features_scaler)
-        pred_data_loader = MoleculeDataLoader(
-            dataset=pred_data,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers
-        )
-        preds = predict(
-            model=self.model,
-            data_loader=pred_data_loader,
-            scaler=self.scaler,
-            return_unc_parameters=True
-        )
-        if self.args.dataset_type == 'classification':
-            preds = np.asarray(preds)
-            preds = np.concatenate([preds, 1-preds], axis=1)
-            return 0.25 - np.var(preds, axis=1)
-        elif self.args.dataset_type == 'multiclass':
-            return 0.25 - np.var(preds, axis=1)
-        elif self.args.dataset_type == 'regression':
-            if self.model.loss_function == "mve":
-                preds, var = preds
-                return np.array(var).ravel()
-            elif self.args.loss_function == 'evidential':
-                preds, lambdas, alphas, betas = preds
-                return (np.array(betas) / (np.array(lambdas) * (np.array(alphas) - 1))).ravel()
-            else:
-                raise ValueError
+        if self.chemprop_predict_args.uncertainty_method is None and self.chemprop_train_args.dataset_type == "classification":
+            preds = np.array(self.predict(pred_data)[0])
+            preds = np.array([preds, 1-preds]).T
+            return (0.25 - np.var(preds, axis=1)) * 4
         else:
-            raise ValueError
+            return self.predict(pred_data)[1]
 
     def predict_value(self, pred_data):
-        args = self.args
-        if args.features_scaling:
-            pred_data.normalize_features(self.features_scaler)
-        pred_data_loader = MoleculeDataLoader(
-            dataset=pred_data,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers
-        )
-        preds = predict(
-            model=self.model,
-            data_loader=pred_data_loader,
-            scaler=self.scaler
-        )
-        if self.args.dataset_type in ['classification', 'multiclass']:
-            return np.asarray(preds).ravel()
-        elif self.args.dataset_type == 'regression':
-            return np.asarray(preds).ravel()
-        else:
-            raise ValueError()
+        return self.predict(pred_data)[0]
+    
+    def get_cbp_stats(self):
+        """Return CBP statistics collected during training"""
+        return self.cbp_stats
