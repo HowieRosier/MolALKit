@@ -1,0 +1,7 @@
+{
+    "data_format": "mgktools",
+    "model": "xgboost",
+    "fingerprints_class": [
+        "rdkit_2d_normalized"
+    ]
+}

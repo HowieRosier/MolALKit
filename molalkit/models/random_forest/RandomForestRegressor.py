@@ -7,8 +7,8 @@ from molalkit.models.base import BaseSklearnModel
 
 
 class RFRegressor(RandomForestRegressor, BaseSklearnModel):
-    def fit_alb(self, train_data):
-        return self.fit_alb_(train_data, self)
+    def fit_molalkit(self, train_data, iteration: int = 0):
+        return self.fit_molalkit_(train_data, self)
 
     def predict_uncertainty(self, pred_data):
         X = pred_data.X
@@ -19,7 +19,7 @@ class RFRegressor(RandomForestRegressor, BaseSklearnModel):
         n_jobs, _, _ = _partition_estimators(self.n_estimators, self.n_jobs)
 
         results = Parallel(
-            n_jobs=n_jobs, verbose=self.verbose, prefer='processes')(
+            n_jobs=n_jobs, verbose=self.verbose, prefer="processes")(
             delayed(e.predict)(X)
             for e in self.estimators_)
         return np.asarray(results).std(axis=0)

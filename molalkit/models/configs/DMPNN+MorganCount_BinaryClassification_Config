@@ -1,0 +1,17 @@
+{
+    "data_format": "chemprop",
+    "loss_function": "binary_cross_entropy",
+    "epochs": 50,
+    "depth": 3,
+    "hidden_size": 300,
+    "ffn_num_layers": 2,
+    "ffn_hidden_size": 300,
+    "dropout": 0.0,
+    "batch_size": 50,
+    "ensemble_size": 1,
+    "fingerprints_class": [
+        "morgan_count"
+    ],
+    "radius": 2,
+    "num_bits": 1024
+}

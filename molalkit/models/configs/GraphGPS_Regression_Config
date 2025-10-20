@@ -1,0 +1,5 @@
+{
+    "data_format": "graphgps",
+    "cfg": "GPS_regression.yaml",
+    "ensemble_size": 1
+}

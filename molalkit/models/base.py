@@ -6,7 +6,7 @@ import numpy as np
 
 class BaseModel(ABC):
     @abstractmethod
-    def fit_alb(self, data):
+    def fit_molalkit(self, data, iteration: int = 0):
         pass
 
     @abstractmethod
@@ -20,18 +20,20 @@ class BaseModel(ABC):
 
 class BaseSklearnModel(BaseModel, ABC):
     @staticmethod
-    def fit_alb_(train_data, sklearn_model):
+    def fit_molalkit_(train_data, sklearn_model):
         X = train_data.X
         y = train_data.y
-        if y.ndim == 2:
-            assert y.shape[1] == 1
-            y = y.ravel()
+        assert y.ndim == 2
+        assert y.shape[1] == 1
+        y = y.ravel()
         return sklearn_model.fit(X, y)
 
     @staticmethod
     def predict_uncertainty_c(pred_data, model):
         X = pred_data.X
         p = model.predict_proba(X)
+        # cross entropy
+        # return entropy(p, base=2, axis=1)
         return (0.25 - np.var(p, axis=1)) * 4
 
     @staticmethod

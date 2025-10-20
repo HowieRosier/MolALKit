@@ -1,13 +1,34 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import numpy as np
-from sklearn.naive_bayes import BernoulliNB
+from sklearn.naive_bayes import BernoulliNB, MultinomialNB, GaussianNB
 from molalkit.models.base import BaseSklearnModel
 
 
-class NBClassifier(BernoulliNB, BaseSklearnModel):
-    def fit_alb(self, train_data):
-        return self.fit_alb_(train_data, self)
+class BernoulliNBClassifier(BernoulliNB, BaseSklearnModel):
+    def fit_molalkit(self, train_data, iteration: int = 0):
+        return self.fit_molalkit_(train_data, self)
+
+    def predict_uncertainty(self, pred_data):
+        return self.predict_uncertainty_c(pred_data, self)
+
+    def predict_value(self, pred_data):
+        return self.predict_value_c(pred_data, self)
+
+
+class MultinomialNBClassifier(MultinomialNB, BaseSklearnModel):
+    def fit_molalkit(self, train_data, iteration: int = 0):
+        return self.fit_molalkit_(train_data, self)
+
+    def predict_uncertainty(self, pred_data):
+        return self.predict_uncertainty_c(pred_data, self)
+
+    def predict_value(self, pred_data):
+        return self.predict_value_c(pred_data, self)
+
+
+class GaussianNBClassifier(GaussianNB, BaseSklearnModel):
+    def fit_molalkit(self, train_data, iteration: int = 0):
+        return self.fit_molalkit_(train_data, self)
 
     def predict_uncertainty(self, pred_data):
         return self.predict_uncertainty_c(pred_data, self)

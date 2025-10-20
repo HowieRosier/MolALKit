@@ -1,0 +1,10 @@
+{
+    "data_format": "mgktools",
+    "model": "gaussian_process_regression",
+    "alpha": 0.01,
+    "graph_kernel_type": "pre-computed",
+    "mgk_files": [
+        "product-msnorm.json"
+    ],
+    "uncertainty_type": "value"
+}

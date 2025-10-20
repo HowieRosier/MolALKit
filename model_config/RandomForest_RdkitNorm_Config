@@ -1,7 +1,0 @@
-{
-    "data_format": "fingerprints",
-    "model": "random_forest",
-    "fingerprints_class": [
-        "rdkit_2d_normalized"
-    ]
-}

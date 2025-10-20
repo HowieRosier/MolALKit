@@ -1,0 +1,9 @@
+{
+    "data_format": "mgktools",
+    "model": "support_vector_machine",
+    "C": 1.0,
+    "graph_kernel_type": "pre-computed",
+    "mgk_files": [
+        "product-msnorm.json"
+    ]
+}

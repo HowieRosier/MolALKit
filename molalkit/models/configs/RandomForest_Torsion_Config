@@ -1,0 +1,8 @@
+{
+    "data_format": "mgktools",
+    "model": "random_forest",
+    "fingerprints_class": [
+        "torsion"
+    ],
+    "num_bits": 1024
+}

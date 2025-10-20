@@ -1,0 +1,10 @@
+{
+    "data_format": "mgktools",
+    "model": "xgboost",
+    "fingerprints_class": [
+        "rdkit_2d_normalized", "morgan"
+    ],
+    "radius": 2,
+    "num_bits": 1024,
+    "features_combination": "concat"
+}

@@ -1,0 +1,16 @@
+{
+    "data_format": "mgktools",
+    "model": "support_vector_machine",
+    "C": 1.0,
+    "graph_kernel_type": "pre-computed",
+    "mgk_files": [
+        "product-msnorm.json"
+    ],
+    "fingerprints_class": [
+        "rdkit_2d_normalized"
+    ],
+    "features_kernel_type": "rbf",
+    "features_hyperparameters": [
+        10.0
+    ]
+}

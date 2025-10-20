@@ -1,0 +1,7 @@
+{
+    "data_format": "mgktools",
+    "model": "BernoulliNB",
+    "fingerprints_class": [
+        "rdkit_2d_normalized"
+    ]
+}

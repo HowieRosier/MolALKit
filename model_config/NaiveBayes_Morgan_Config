@@ -1,9 +1,0 @@
-{
-    "data_format": "fingerprints",
-    "model": "naive_bayes",
-    "fingerprints_class": [
-        "morgan"
-    ],
-    "radius": 2,
-    "num_bits": 1024
-}

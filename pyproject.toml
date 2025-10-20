@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "molalkit"
+description = "MolALKit: A Toolkit for Active Learning in Molecular Data."
+version = "1.0.0"
+authors = [
+    {name = "Yan Xiang", email="yan.xiang@duke.edu"}
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+classifiers = [
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent"
+]
+keywords = [
+    "chemistry",
+    "active machine learning",
+    "molecular property prediction",
+    "drug discovery"
+]
+requires-python = ">=3.9"
+dependencies = [
+    "mgktools==3.1.0",
+    "selfies",
+    "xgboost"
+]
+
+[project.urls]
+source = "https://github.com/xiangyan93/molalkit"
+PyPi = "https://pypi.org/project/molalkit"
+
+[project.scripts]
+molalkit_run = "molalkit.exe.run:molalkit_run"
+
+[tool.setuptools.package-data]
+"*" = ["data/datasets/*.csv", "models/configs/*Config", "models/graphgps/*yaml", "models/molformer/bert_vocab.txt"]
+
+[tool.setuptools.packages.find]
+where = ["."]  # list of folders that contain the packages (["."] by default)
+namespaces = false  # to disable scanning PEP 420 namespaces (true by default)

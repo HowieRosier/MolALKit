@@ -1,0 +1,9 @@
+{
+    "data_format": "mgktools",
+    "model": "gaussian_process_classification",
+    "fingerprints_class": [
+        "rdkit_2d_normalized"
+    ],
+    "features_kernel_type": "rbf",
+    "features_hyperparameters": 10.0
+}

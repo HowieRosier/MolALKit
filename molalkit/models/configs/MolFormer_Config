@@ -1,0 +1,15 @@
+{
+    "data_format": "mgktools",
+    "model": "MolFormer",
+    "pretrained_path": "N-Step-Checkpoint_3_30000.ckpt",
+    "n_head": 12,
+    "n_layer": 12,
+    "n_embd": 768,
+    "d_dropout": 0.1,
+    "dropout": 0.1,
+    "learning_rate": 3e-5,
+    "num_feats": 32,
+    "batch_size": 128,
+    "epochs": 50,
+    "ensemble_size": 1
+}

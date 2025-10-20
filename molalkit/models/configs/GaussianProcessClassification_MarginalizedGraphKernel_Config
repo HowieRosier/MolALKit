@@ -1,0 +1,8 @@
+{
+    "data_format": "mgktools",
+    "model": "gaussian_process_classification",
+    "graph_kernel_type": "pre-computed",
+    "mgk_files": [
+        "product-msnorm.json"
+    ]
+}

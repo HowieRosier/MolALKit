@@ -1,0 +1,20 @@
+{
+    "data_format": "mgktools",
+    "model": "gaussian_process_regression",
+    "alpha": 0.01,
+    "graph_kernel_type": "pre-computed",
+    "mgk_files": [
+        "product-msnorm.json",
+        "product-msnorm.json"
+    ],
+    "uncertainty_type": "value",
+    "fingerprints_class": [
+        "morgan"
+    ],
+    "features_kernel_type": "dot_product",
+    "features_hyperparameters": [
+        0.0
+    ],
+    "radius": 2,
+    "num_bits": 1024
+}

@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import numpy as np
 from sklearn.linear_model import LogisticRegression
 from molalkit.models.base import BaseSklearnModel
 
 
 class LogisticRegressor(LogisticRegression, BaseSklearnModel):
-    def fit_alb(self, train_data):
-        return self.fit_alb_(train_data, self)
+    def fit_molalkit(self, train_data, iteration: int = 0):
+        return self.fit_molalkit_(train_data, self)
 
     def predict_uncertainty(self, pred_data):
         return self.predict_uncertainty_c(pred_data, self)

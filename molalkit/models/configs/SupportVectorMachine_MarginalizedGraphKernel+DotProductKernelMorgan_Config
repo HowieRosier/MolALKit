@@ -1,0 +1,18 @@
+{
+    "data_format": "mgktools",
+    "model": "support_vector_machine",
+    "C": 1.0,
+    "graph_kernel_type": "pre-computed",
+    "mgk_files": [
+        "product-msnorm.json"
+    ],
+    "fingerprints_class": [
+        "morgan"
+    ],
+    "radius": 2,
+    "num_bits": 1024,
+    "features_kernel_type": "dot_product",
+    "features_hyperparameters": [
+        1.0
+    ]
+}
