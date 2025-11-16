@@ -306,14 +306,14 @@ class ModelArgs(Tap):
     # CBP (Continual Backpropagation) parameters
     cbp: bool = False
     """Enable Continual Backpropagation for neural plasticity"""
-    maturity_threshold: int = 20
+    maturity_threshold: int = 100
     """Number of training steps before a neuron is considered mature enough for replacement"""
-    replacement_rate: float = 1e-4
+    replacement_rate: float = 0.001
     """Fraction of neurons to replace at each replacement step"""
-    decay_rate: float = 0.99
+    decay_rate: float = 0.95
     """Decay rate for neuron utility tracking"""
     util_type: str = 'contribution'
-    """Utility calculation method: 'contribution', 'magnitude', or 'hybrid'"""
+    """Utility calculation method: 'contribution', 'weight', 'adaptation', or 'random'"""
 
     @property
     def model_configs_dict(self) -> List[Dict]:

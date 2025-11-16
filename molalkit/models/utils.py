@@ -72,9 +72,9 @@ def get_model(data_format: Literal["mgktools", "chemprop", "graphgps"],
               perturb_sigma: float = 0.0,
               # CBP (Continual Backpropagation) parameters
               cbp: bool = False,
-              maturity_threshold: int = 20,
-              replacement_rate: float = 1e-4,
-              decay_rate: float = 0.99,
+              maturity_threshold: int = 100,
+              replacement_rate: float = 0.001,
+              decay_rate: float = 0.95,
               util_type: str = 'contribution',
               # graphgps arguments
               cfg_path: str = None,

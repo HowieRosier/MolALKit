@@ -66,10 +66,12 @@ class MPNN:
                  perturb_sigma: float = 0.0,
                  # CBP (Continual Backpropagation) parameters
                  cbp: bool = False,
-                 maturity_threshold: int = 20,
-                 replacement_rate: float = 1e-4,
-                 decay_rate: float = 0.99,
+                 maturity_threshold: int = 100,
+                 replacement_rate: float = 0.001,
+                 decay_rate: float = 0.95,
                  util_type: str = 'contribution',
+                 enable_gradient_logging: bool = True,
+                 gradient_log_frequency: int = 1000000,  # Default: epoch-level logging
                  logger: Logger = None,
                  # logging controls
                  log_iter_loss: bool = False,
@@ -115,6 +117,8 @@ class MPNN:
         args.replacement_rate = replacement_rate
         args.decay_rate = decay_rate
         args.util_type = util_type
+        args.enable_gradient_logging = enable_gradient_logging
+        args.gradient_log_frequency = gradient_log_frequency
         args.process_args()
         args.task_names = get_task_names(path=args.data_path, smiles_columns=args.smiles_columns,
                                          target_columns=args.target_columns, ignore_columns=args.ignore_columns)
@@ -124,11 +128,8 @@ class MPNN:
         self.logger = logger
         # SnP: perturb noise std; shrink comes from weight_decay
         self.perturb_sigma = perturb_sigma
-        # Initialize CBP statistics tracking
         self.cbp_stats = {}
-        # Storage for CBP trainers across AL iterations (for FFN CBP state persistence)
-        self.cbp_trainers = []
-        # Enable per-iteration loss logging via ChemProp if requested
+        self.cbp_trainer = None  # Single CBP trainer persists across iterations
         if log_iter_loss:
             try:
                 # Log every batch inside chemprop train loop
@@ -139,10 +140,8 @@ class MPNN:
         args_predict.uncertainty_method = uncertainty_method
         args_predict.uncertainty_dropout_p = uncertainty_dropout_p
         args_predict.dropout_sampling_size = dropout_sampling_size
-        # args_predict.checkpoint_dir = save_dir
         args_predict.test_path = "fake"
         args_predict.preds_path = "fake"
-        # args_predict.process_args()
         args_predict._parsed = True
         args_predict.checkpoint_paths = [None] * args.ensemble_size
         self.chemprop_predict_args = args_predict
@@ -153,6 +152,7 @@ class MPNN:
         args = self.chemprop_train_args
         args.train_data_size = len(train_data)
         logger = self.logger
+
         if logger is not None:
             debug, info = logger.debug, logger.info
         else:
@@ -237,33 +237,23 @@ class MPNN:
                 debug(f"Total number of parameters = {param_count_all(model):,}")
             else:
                 debug(f"Number of parameters = {param_count_all(model):,}")
-            
-            # Log CBP configuration if enabled
+
             if args.cbp:
-                debug(f"CBP is enabled for training")
-                debug(f"  Maturity threshold: {args.maturity_threshold}")
-                debug(f"  Replacement rate: {args.replacement_rate}")
-                debug(f"  Decay rate: {args.decay_rate}")
-                debug(f"  Utility type: {args.util_type}")
-            
-            # Create or reuse CBP trainer if CBP is enabled
+                debug(f"CBP enabled - maturity: {args.maturity_threshold}, rate: {args.replacement_rate}, decay: {args.decay_rate}, util: {args.util_type}")
+
             cbp_trainer = None
+            cbp_log_dir = None
+
             if args.cbp:
-                # Reuse existing CBP trainer in continuous_fit mode to preserve FFN ages/utils
-                if self.continuous_fit and len(self.cbp_trainers) > model_idx:
-                    cbp_trainer = self.cbp_trainers[model_idx]
-                    debug(f"Reusing existing CBP trainer for model {model_idx} (continuous_fit mode)")
-                    # Optionally, report FFN max age for visibility
-                    if hasattr(cbp_trainer, 'gnt') and cbp_trainer.gnt:
-                        try:
-                            max_age = max(torch.max(age).item() for age in cbp_trainer.gnt.ages) if cbp_trainer.gnt.ages else 0
-                            debug(f"  FFN max age: {max_age}, maturity_threshold: {args.maturity_threshold}")
-                        except Exception:
-                            pass
-                else:
-                    # Create new CBP trainer for first iteration or non-continuous mode
-                    cbp_log_dir = os.path.join(save_dir, 'cbp_logs')
-                    cbp_trainer = ContinualBackpropTrainer(
+                # Define cbp_log_dir for both new and reused cases
+                cbp_log_dir = os.path.join(save_dir, 'cbp_logs')
+
+                if self.cbp_trainer is None:
+                    makedirs(cbp_log_dir)
+                    enable_gradient_logging = getattr(args, 'enable_gradient_logging', True)
+                    gradient_log_frequency = getattr(args, 'gradient_log_frequency', 1000000)
+
+                    self.cbp_trainer = ContinualBackpropTrainer(
                         model=model,
                         args=args,
                         step_size=args.init_lr,
@@ -271,16 +261,26 @@ class MPNN:
                         decay_rate=args.decay_rate,
                         maturity_threshold=args.maturity_threshold,
                         util_type=args.util_type,
+                        accumulate=getattr(args, 'accumulate', True),
                         enable_cbp_logging=True,
-                        log_dir=cbp_log_dir
+                        log_dir=cbp_log_dir,
+                        enable_gradient_logging=enable_gradient_logging,
+                        gradient_log_frequency=gradient_log_frequency
                     )
-                    debug(f"CBP trainer initialized with log directory: {cbp_log_dir}")
-                
-                # Use CBP trainer's optimizer
+
+                    debug(f"CBP trainer initialized: {cbp_log_dir}")
+                    if enable_gradient_logging:
+                        debug(f"  Gradient logging: epoch-level" if gradient_log_frequency >= 1000000 else f"  Gradient logging: batch-level")
+                else:
+                    self.cbp_trainer.model = model
+                    debug(f"Reusing CBP trainer across iterations")
+                    if self.cbp_trainer.cbp_logger:
+                        self.cbp_trainer.cbp_logger.mark_iteration_start(iteration)
+
+                cbp_trainer = self.cbp_trainer
                 optimizer = cbp_trainer.optimizer
                 debug(f"Using CBP trainer's optimizer")
             else:
-                # Standard mode: create standard optimizer
                 optimizer = build_optimizer(model, args)
                 debug(f"Using standard optimizer")
             
@@ -338,10 +338,11 @@ class MPNN:
                 optimizer.step = snp_step  # type: ignore
 
             n_iter = 0
-            epoch_losses = []  # Track epoch losses for CBP stats
-            
+            epoch_losses = []
+
             for epoch in trange(args.epochs):
                 debug(f"Epoch {epoch}")
+
                 result = train(
                     model=model,
                     data_loader=train_data_loader,
@@ -352,7 +353,8 @@ class MPNN:
                     n_iter=n_iter,
                     logger=logger,
                     writer=writer,
-                    cbp_trainer=cbp_trainer  # Pass CBP trainer if created
+                    cbp_trainer=cbp_trainer,
+                    epoch=epoch
                 )
                 
                 # Handle both old format (int) and new format (tuple)
@@ -365,59 +367,122 @@ class MPNN:
                         pass
                 else:
                     n_iter = result
-                    
-                # Log CBP epoch statistics if CBP is enabled
+
                 if cbp_trainer and hasattr(cbp_trainer, 'log_epoch_cbp_stats'):
                     cbp_trainer.log_epoch_cbp_stats(epoch)
+
+                    if cbp_trainer.cbp_logger:
+                        total_replacements = cbp_trainer.cbp_logger.get_total_replacements()
+                        if total_replacements > 0:
+                            debug(f"  CBP: Total neuron replacements so far: {total_replacements}")
+
+                        if hasattr(cbp_trainer.cbp_logger, 'replacement_history'):
+                            for layer_name, history in cbp_trainer.cbp_logger.replacement_history.items():
+                                if history:
+                                    layer_replacements = sum(len(h['indices']) for h in history)
+                                    if layer_replacements > 0:
+                                        debug(f"    {layer_name}: {layer_replacements} replacements")
                     
                 if isinstance(scheduler, ExponentialLR):
                     scheduler.step()
             if len(self.models) < args.ensemble_size:
                 assert len(self.models) == model_idx
                 self.models.append(model)
-                # Also store CBP trainer if CBP is enabled
                 if args.cbp and cbp_trainer:
-                    # Ensure list capacity
-                    while len(self.cbp_trainers) < args.ensemble_size:
-                        self.cbp_trainers.append(None)
+                    if len(self.cbp_trainers) <= model_idx:
+                        self.cbp_trainers.extend([None] * (model_idx + 1 - len(self.cbp_trainers)))
                     self.cbp_trainers[model_idx] = cbp_trainer
 
             self.scalers.append((scaler, features_scaler, None, None))
             
-            # Store training statistics
             if epoch_losses:
                 self.cbp_stats['epoch_losses'] = epoch_losses
                 self.cbp_stats['final_loss'] = epoch_losses[-1] if epoch_losses else None
-                
+
                 if args.cbp:
                     self.cbp_stats['cbp_enabled'] = True
                     self.cbp_stats['iteration'] = iteration
                     debug(f"Training completed for model {model_idx} with CBP enabled")
                     debug(f"  Final loss: {epoch_losses[-1] if epoch_losses else 'N/A'}")
-                    
-                    # Save CBP summary
-                    if cbp_trainer and hasattr(cbp_trainer, 'cbp_logger') and cbp_trainer.cbp_logger:
-                        cbp_trainer.cbp_logger.save_summary()
-                        
-                    # Save CBP stats to JSON file
-                    cbp_stats_file = os.path.join(save_dir, 'cbp_stats.json')
-                    with open(cbp_stats_file, 'w') as f:
-                        cbp_stats_to_save = {
-                            'cbp_enabled': True,
-                            'maturity_threshold': args.maturity_threshold,
-                            'replacement_rate': args.replacement_rate,
-                            'decay_rate': args.decay_rate,
-                            'util_type': args.util_type,
-                            'iteration': iteration,
-                            'epochs': args.epochs,
-                            'final_loss': epoch_losses[-1] if epoch_losses else None,
-                            'epoch_losses': epoch_losses
-                        }
-                        json.dump(cbp_stats_to_save, f, indent=2)
-                    debug(f"CBP stats saved to: {cbp_stats_file}")
+
+                    if cbp_trainer and cbp_trainer.cbp_logger:
+                        iter_dir = os.path.join(cbp_log_dir, f'iter_{iteration}')
+                        makedirs(iter_dir)
+
+                        # Copy epochs_summary.json to iteration directory
+                        epochs_summary_src = os.path.join(cbp_log_dir, 'epochs_summary.json')
+                        if os.path.exists(epochs_summary_src):
+                            import shutil
+                            shutil.copy2(epochs_summary_src, os.path.join(iter_dir, 'epochs_summary.json'))
+                            debug(f"  Saved epochs_summary.json to iter_{iteration}/")
+
+                        # Save final_epoch.log to iteration directory
+                        if hasattr(cbp_trainer.cbp_logger, 'final_epoch_data') and cbp_trainer.cbp_logger.final_epoch_data:
+                            final_epoch_path = os.path.join(iter_dir, 'final_epoch.log')
+                            with open(final_epoch_path, 'w') as f:
+                                epoch_data = cbp_trainer.cbp_logger.final_epoch_data
+                                f.write(f"Final Epoch Neuron-Level Data\n")
+                                f.write(f"Iteration: {iteration}\n")
+                                f.write(f"Epoch: {epoch_data['epoch']}\n")
+                                f.write(f"Timestamp: {epoch_data['timestamp']}\n")
+                                f.write("=" * 80 + "\n\n")
+
+                                neuron_data = epoch_data.get('neuron_data', {})
+
+                                # Write gradients
+                                if neuron_data.get('gradients'):
+                                    f.write("GRADIENTS:\n")
+                                    f.write("-" * 40 + "\n")
+                                    for layer_name, grad_snapshots in neuron_data['gradients'].items():
+                                        f.write(f"\nLayer: {layer_name}\n")
+                                        if grad_snapshots:
+                                            last_snapshot = grad_snapshots[-1]
+                                            f.write(f"  Batch: {last_snapshot['batch']}\n")
+                                            f.write(f"  Values: {last_snapshot['values']}\n")
+                                    f.write("\n")
+
+                                # Write utilities
+                                if neuron_data.get('utilities'):
+                                    f.write("UTILITIES:\n")
+                                    f.write("-" * 40 + "\n")
+                                    for layer_name, util_snapshots in neuron_data['utilities'].items():
+                                        f.write(f"\nLayer: {layer_name}\n")
+                                        if util_snapshots:
+                                            last_snapshot = util_snapshots[-1]
+                                            f.write(f"  Batch: {last_snapshot['batch']}\n")
+                                            f.write(f"  Values: {last_snapshot['values']}\n")
+                                    f.write("\n")
+
+                                # Write activations
+                                if neuron_data.get('activations'):
+                                    f.write("ACTIVATIONS:\n")
+                                    f.write("-" * 40 + "\n")
+                                    for layer_name, act_snapshots in neuron_data['activations'].items():
+                                        f.write(f"\nLayer: {layer_name}\n")
+                                        if act_snapshots:
+                                            last_snapshot = act_snapshots[-1]
+                                            f.write(f"  Batch: {last_snapshot['batch']}\n")
+                                            f.write(f"  Values: {last_snapshot['values']}\n")
+                                    f.write("\n")
+
+                                f.write("=" * 80 + "\n")
+                                f.write("End of Final Epoch Data\n")
+
+                            debug(f"  Saved final_epoch.log to iter_{iteration}/")
+
+                        print(f"📊 Iteration {iteration} CBP logs saved to {iter_dir}")
+
+                    debug(f"CBP training completed for iteration {iteration}")
             # save the model after training
             # save_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), model, scaler,
             #                 features_scaler, None, None, args)
+
+    def close_cbp_trainer(self):
+        """Close the CBP trainer and save final statistics when all iterations are complete."""
+        if self.cbp_trainer and self.cbp_trainer.cbp_logger:
+            print("📊 Saving final CBP training summary...")
+            self.cbp_trainer.save_cbp_summary()
+            self.cbp_trainer = None
 
     def predict(self, pred_data, batch_size: int = 10000):
         """
