@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.optim.lr_scheduler import ExponentialLR
 from chemprop.data import get_class_sizes, MoleculeDataLoader, get_task_names
-from chemprop.utils import build_optimizer, build_lr_scheduler, makedirs, load_mpn_model
+from chemprop.utils import build_optimizer, build_lr_scheduler, makedirs, load_mpn_model, save_checkpoint, load_checkpoint
 from chemprop.nn_utils import param_count, param_count_all
 from chemprop.models import MoleculeModel
 from chemprop.train.loss_functions import get_loss_func
@@ -215,15 +215,28 @@ class MPNN:
             makedirs(save_dir)
             writer = None
             if self.continuous_fit and len(self.models) == args.ensemble_size:
-                debug(
-                    f"Loading model {model_idx} that fitted at previous iteration")
+                debug(f"Loading model {model_idx} that fitted at previous iteration")
                 model = self.models[model_idx]
             else:
-                debug(f"Building model {model_idx} from scratch")
-                model = MoleculeModel(args)
-                if args.cuda:
-                    debug("Moving model to cuda")
-                model = model.to(args.device)
+                # Try to load from checkpoint first
+                checkpoint_path = os.path.join(save_dir, 'model.pth')
+                if os.path.exists(checkpoint_path):
+                    try:
+                        debug(f"Loading model {model_idx} from checkpoint: {checkpoint_path}")
+                        model = load_checkpoint(checkpoint_path, args.device)
+                        debug(f"Successfully loaded model from checkpoint")
+                    except Exception as e:
+                        debug(f"Failed to load checkpoint: {e}. Building model from scratch")
+                        model = MoleculeModel(args)
+                        if args.cuda:
+                            debug("Moving model to cuda")
+                        model = model.to(args.device)
+                else:
+                    debug(f"Building model {model_idx} from scratch")
+                    model = MoleculeModel(args)
+                    if args.cuda:
+                        debug("Moving model to cuda")
+                    model = model.to(args.device)
 
             if args.mpn_path is not None:
                 debug(f"Loading MPN parameters from {args.mpn_path}.")
@@ -473,9 +486,68 @@ class MPNN:
                         print(f"📊 Iteration {iteration} CBP logs saved to {iter_dir}")
 
                     debug(f"CBP training completed for iteration {iteration}")
-            # save the model after training
-            # save_checkpoint(os.path.join(save_dir, MODEL_FILE_NAME), model, scaler,
-            #                 features_scaler, None, None, args)
+
+            # Save checkpoint after training each model
+            checkpoint_path = os.path.join(save_dir, 'model.pth')
+            save_checkpoint(checkpoint_path, model, scaler, features_scaler, None, None, args)
+            debug(f"Checkpoint saved to {checkpoint_path}")
+
+    def save_checkpoint(self):
+        """Save checkpoints for all ensemble models."""
+        args = self.chemprop_train_args
+        if not hasattr(self, 'models'):
+            print("No models to save")
+            return
+
+        for model_idx, model in enumerate(self.models):
+            save_dir = os.path.join(args.save_dir, f"model_{model_idx}")
+            makedirs(save_dir)
+            checkpoint_path = os.path.join(save_dir, 'model.pth')
+            if model_idx < len(self.scalers):
+                scaler, features_scaler, _, _ = self.scalers[model_idx]
+            else:
+                scaler, features_scaler = None, None
+            save_checkpoint(checkpoint_path, model, scaler, features_scaler, None, None, args)
+            print(f"✅ Checkpoint saved for model {model_idx} to {checkpoint_path}")
+
+    def load_checkpoint(self):
+        """Load checkpoints for all ensemble models if they exist."""
+        args = self.chemprop_train_args
+        models = []
+        scalers = []
+        loaded_count = 0
+
+        for model_idx in range(args.ensemble_size):
+            save_dir = os.path.join(args.save_dir, f"model_{model_idx}")
+            checkpoint_path = os.path.join(save_dir, 'model.pth')
+
+            if os.path.exists(checkpoint_path):
+                try:
+                    # Load checkpoint which includes model and scalers
+                    state = torch.load(checkpoint_path, map_location=args.device, weights_only=False)
+                    model = load_checkpoint(checkpoint_path, args.device)
+                    models.append(model)
+
+                    # Extract scalers from checkpoint if available
+                    scaler = state.get('data_scaler', None)
+                    features_scaler = state.get('features_scaler', None)
+                    scalers.append((scaler, features_scaler, None, None))
+
+                    loaded_count += 1
+                    print(f"✅ Loaded checkpoint for model {model_idx} from {checkpoint_path}")
+                except Exception as e:
+                    print(f"⚠️ Failed to load checkpoint for model {model_idx}: {e}")
+                    return False
+            else:
+                print(f"⚠️ No checkpoint found for model {model_idx} at {checkpoint_path}")
+                return False
+
+        if loaded_count == args.ensemble_size:
+            self.models = models
+            self.scalers = scalers
+            print(f"🎉 Successfully loaded all {loaded_count} model checkpoints with scalers")
+            return True
+        return False
 
     def close_cbp_trainer(self):
         """Close the CBP trainer and save final statistics when all iterations are complete."""
