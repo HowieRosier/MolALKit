@@ -441,6 +441,12 @@ class MPNN:
                 torch.save(cbp_state, cbp_state_path)
                 debug(f"CBP optimizer state saved to {cbp_state_path}")
 
+        # Clean up any remaining pending CBP state entries that were not consumed
+        # This happens when cbp_trainer was reused (already existed) instead of being created
+        if hasattr(self, '_pending_cbp_state') and self._pending_cbp_state:
+            debug(f"Cleaning up {len(self._pending_cbp_state)} unused pending CBP state entries")
+            self._pending_cbp_state.clear()
+
     def save_checkpoint(self, iteration: int = 0):
         """Save checkpoints for all ensemble models including CBP state."""
         args = self.chemprop_train_args
