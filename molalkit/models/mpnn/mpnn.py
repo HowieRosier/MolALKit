@@ -281,6 +281,13 @@ class MPNN:
                         gradient_log_frequency=gradient_log_frequency
                     )
 
+                    # Restore optimizer state if loading from checkpoint
+                    if hasattr(self, '_pending_cbp_state') and model_idx in self._pending_cbp_state:
+                        cbp_state = self._pending_cbp_state[model_idx]
+                        self.cbp_trainer.optimizer.load_state_dict(cbp_state['optimizer_state_dict'])
+                        debug(f"Restored CBP optimizer state from checkpoint (iteration {cbp_state.get('iteration', 0)})")
+                        del self._pending_cbp_state[model_idx]
+
                     debug(f"CBP trainer initialized: {cbp_log_dir}")
                     if enable_gradient_logging:
                         debug(f"  Gradient logging: epoch-level" if gradient_log_frequency >= 1000000 else f"  Gradient logging: batch-level")
@@ -417,74 +424,6 @@ class MPNN:
                     self.cbp_stats['iteration'] = iteration
                     debug(f"Training completed for model {model_idx} with CBP enabled")
                     debug(f"  Final loss: {epoch_losses[-1] if epoch_losses else 'N/A'}")
-
-                    if cbp_trainer and cbp_trainer.cbp_logger:
-                        iter_dir = os.path.join(cbp_log_dir, f'iter_{iteration}')
-                        makedirs(iter_dir)
-
-                        # Copy epochs_summary.json to iteration directory
-                        epochs_summary_src = os.path.join(cbp_log_dir, 'epochs_summary.json')
-                        if os.path.exists(epochs_summary_src):
-                            import shutil
-                            shutil.copy2(epochs_summary_src, os.path.join(iter_dir, 'epochs_summary.json'))
-                            debug(f"  Saved epochs_summary.json to iter_{iteration}/")
-
-                        # Save final_epoch.log to iteration directory
-                        if hasattr(cbp_trainer.cbp_logger, 'final_epoch_data') and cbp_trainer.cbp_logger.final_epoch_data:
-                            final_epoch_path = os.path.join(iter_dir, 'final_epoch.log')
-                            with open(final_epoch_path, 'w') as f:
-                                epoch_data = cbp_trainer.cbp_logger.final_epoch_data
-                                f.write(f"Final Epoch Neuron-Level Data\n")
-                                f.write(f"Iteration: {iteration}\n")
-                                f.write(f"Epoch: {epoch_data['epoch']}\n")
-                                f.write(f"Timestamp: {epoch_data['timestamp']}\n")
-                                f.write("=" * 80 + "\n\n")
-
-                                neuron_data = epoch_data.get('neuron_data', {})
-
-                                # Write gradients
-                                if neuron_data.get('gradients'):
-                                    f.write("GRADIENTS:\n")
-                                    f.write("-" * 40 + "\n")
-                                    for layer_name, grad_snapshots in neuron_data['gradients'].items():
-                                        f.write(f"\nLayer: {layer_name}\n")
-                                        if grad_snapshots:
-                                            last_snapshot = grad_snapshots[-1]
-                                            f.write(f"  Batch: {last_snapshot['batch']}\n")
-                                            f.write(f"  Values: {last_snapshot['values']}\n")
-                                    f.write("\n")
-
-                                # Write utilities
-                                if neuron_data.get('utilities'):
-                                    f.write("UTILITIES:\n")
-                                    f.write("-" * 40 + "\n")
-                                    for layer_name, util_snapshots in neuron_data['utilities'].items():
-                                        f.write(f"\nLayer: {layer_name}\n")
-                                        if util_snapshots:
-                                            last_snapshot = util_snapshots[-1]
-                                            f.write(f"  Batch: {last_snapshot['batch']}\n")
-                                            f.write(f"  Values: {last_snapshot['values']}\n")
-                                    f.write("\n")
-
-                                # Write activations
-                                if neuron_data.get('activations'):
-                                    f.write("ACTIVATIONS:\n")
-                                    f.write("-" * 40 + "\n")
-                                    for layer_name, act_snapshots in neuron_data['activations'].items():
-                                        f.write(f"\nLayer: {layer_name}\n")
-                                        if act_snapshots:
-                                            last_snapshot = act_snapshots[-1]
-                                            f.write(f"  Batch: {last_snapshot['batch']}\n")
-                                            f.write(f"  Values: {last_snapshot['values']}\n")
-                                    f.write("\n")
-
-                                f.write("=" * 80 + "\n")
-                                f.write("End of Final Epoch Data\n")
-
-                            debug(f"  Saved final_epoch.log to iter_{iteration}/")
-
-                        print(f"📊 Iteration {iteration} CBP logs saved to {iter_dir}")
-
                     debug(f"CBP training completed for iteration {iteration}")
 
             # Save checkpoint after training each model
@@ -492,8 +431,18 @@ class MPNN:
             save_checkpoint(checkpoint_path, model, scaler, features_scaler, None, None, args)
             debug(f"Checkpoint saved to {checkpoint_path}")
 
-    def save_checkpoint(self):
-        """Save checkpoints for all ensemble models."""
+            # Save CBP optimizer state separately (for full training state recovery)
+            if args.cbp and cbp_trainer:
+                cbp_state_path = os.path.join(save_dir, 'cbp_state.pth')
+                cbp_state = {
+                    'optimizer_state_dict': cbp_trainer.optimizer.state_dict(),
+                    'iteration': iteration,
+                }
+                torch.save(cbp_state, cbp_state_path)
+                debug(f"CBP optimizer state saved to {cbp_state_path}")
+
+    def save_checkpoint(self, iteration: int = 0):
+        """Save checkpoints for all ensemble models including CBP state."""
         args = self.chemprop_train_args
         if not hasattr(self, 'models'):
             print("No models to save")
@@ -510,12 +459,27 @@ class MPNN:
             save_checkpoint(checkpoint_path, model, scaler, features_scaler, None, None, args)
             print(f"✅ Checkpoint saved for model {model_idx} to {checkpoint_path}")
 
+            # Save CBP optimizer state if CBP is enabled
+            if args.cbp and hasattr(self, 'cbp_trainer') and self.cbp_trainer:
+                cbp_state_path = os.path.join(save_dir, 'cbp_state.pth')
+                cbp_state = {
+                    'optimizer_state_dict': self.cbp_trainer.optimizer.state_dict(),
+                    'iteration': iteration,
+                }
+                torch.save(cbp_state, cbp_state_path)
+                print(f"✅ CBP optimizer state saved to {cbp_state_path}")
+
     def load_checkpoint(self):
-        """Load checkpoints for all ensemble models if they exist."""
+        """Load checkpoints for all ensemble models if they exist.
+
+        Returns:
+            tuple: (success: bool, iteration: int) - success status and last saved iteration number
+        """
         args = self.chemprop_train_args
         models = []
         scalers = []
         loaded_count = 0
+        last_iteration = 0
 
         for model_idx in range(args.ensemble_size):
             save_dir = os.path.join(args.save_dir, f"model_{model_idx}")
@@ -535,19 +499,32 @@ class MPNN:
 
                     loaded_count += 1
                     print(f"✅ Loaded checkpoint for model {model_idx} from {checkpoint_path}")
+
+                    # Load CBP optimizer state if available
+                    cbp_state_path = os.path.join(save_dir, 'cbp_state.pth')
+                    if args.cbp and os.path.exists(cbp_state_path):
+                        cbp_state = torch.load(cbp_state_path, map_location=args.device, weights_only=False)
+                        last_iteration = cbp_state.get('iteration', 0)
+
+                        # Store CBP state for later restoration after CBP trainer is created
+                        if not hasattr(self, '_pending_cbp_state'):
+                            self._pending_cbp_state = {}
+                        self._pending_cbp_state[model_idx] = cbp_state
+                        print(f"✅ Loaded CBP state for model {model_idx} (iteration {last_iteration})")
+
                 except Exception as e:
                     print(f"⚠️ Failed to load checkpoint for model {model_idx}: {e}")
-                    return False
+                    return False, 0
             else:
                 print(f"⚠️ No checkpoint found for model {model_idx} at {checkpoint_path}")
-                return False
+                return False, 0
 
         if loaded_count == args.ensemble_size:
             self.models = models
             self.scalers = scalers
             print(f"🎉 Successfully loaded all {loaded_count} model checkpoints with scalers")
-            return True
-        return False
+            return True, last_iteration
+        return False, 0
 
     def close_cbp_trainer(self):
         """Close the CBP trainer and save final statistics when all iterations are complete."""
