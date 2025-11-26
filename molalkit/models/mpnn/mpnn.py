@@ -171,8 +171,6 @@ class MPNN:
         else:
             features_scaler = None
 
-        args.train_data_size = len(train_data)
-
         # Initialize scaler and scale training targets by subtracting mean and dividing standard deviation (
         # regression only)
         if args.dataset_type == "regression":
@@ -218,25 +216,12 @@ class MPNN:
                 debug(f"Loading model {model_idx} that fitted at previous iteration")
                 model = self.models[model_idx]
             else:
-                # Try to load from checkpoint first
-                checkpoint_path = os.path.join(save_dir, 'model.pth')
-                if os.path.exists(checkpoint_path):
-                    try:
-                        debug(f"Loading model {model_idx} from checkpoint: {checkpoint_path}")
-                        model = load_checkpoint(checkpoint_path, args.device)
-                        debug(f"Successfully loaded model from checkpoint")
-                    except Exception as e:
-                        debug(f"Failed to load checkpoint: {e}. Building model from scratch")
-                        model = MoleculeModel(args)
-                        if args.cuda:
-                            debug("Moving model to cuda")
-                        model = model.to(args.device)
-                else:
-                    debug(f"Building model {model_idx} from scratch")
-                    model = MoleculeModel(args)
-                    if args.cuda:
-                        debug("Moving model to cuda")
-                    model = model.to(args.device)
+                # Build model from scratch (checkpoint loading should be done via load_checkpoint() before fit)
+                debug(f"Building model {model_idx} from scratch")
+                model = MoleculeModel(args)
+                if args.cuda:
+                    debug("Moving model to cuda")
+                model = model.to(args.device)
 
             if args.mpn_path is not None:
                 debug(f"Loading MPN parameters from {args.mpn_path}.")
