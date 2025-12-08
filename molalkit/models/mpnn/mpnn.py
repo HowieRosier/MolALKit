@@ -286,8 +286,14 @@ class MPNN:
                 optimizer = cbp_trainer.optimizer
                 debug(f"Using CBP trainer's optimizer")
             else:
-                optimizer = build_optimizer(model, args)
-                debug(f"Using standard optimizer")
+                # Non-CBP mode: reuse optimizer for continuous learning
+                if self.continuous_fit and hasattr(self, '_optimizer') and self._optimizer is not None:
+                    optimizer = self._optimizer
+                    debug(f"Reusing optimizer across iterations")
+                else:
+                    optimizer = build_optimizer(model, args)
+                    self._optimizer = optimizer
+                    debug(f"Using standard optimizer")
             
             # Learning rate scheduler [enabled by default]
             scheduler = build_lr_scheduler(optimizer, args)
