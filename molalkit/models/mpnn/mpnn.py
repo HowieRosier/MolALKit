@@ -296,18 +296,18 @@ class MPNN:
                     debug(f"Using standard optimizer")
             
             # Learning rate scheduler [enabled by default]
-            scheduler = build_lr_scheduler(optimizer, args)
+            # scheduler = build_lr_scheduler(optimizer, args)
             
             # ===== Alternative Schedulers (comment/uncomment to switch) =====
             # 1. DummyLRScheduler: Keep LR constant throughout training
-            # class DummyLRScheduler:
-            #     def __init__(self, optimizer):
-            #         self.optimizer = optimizer
-            #     def get_lr(self):
-            #         return [group['lr'] for group in self.optimizer.param_groups]
-            #     def step(self, *args, **kwargs):
-            #         return
-            # scheduler = DummyLRScheduler(optimizer)
+            class DummyLRScheduler:
+                def __init__(self, optimizer):
+                    self.optimizer = optimizer
+                def get_lr(self):
+                    return [group['lr'] for group in self.optimizer.param_groups]
+                def step(self, *args, **kwargs):
+                    return
+            scheduler = DummyLRScheduler(optimizer)
             
             # 2. HalfwayStepLRScheduler: Keep initial LR for first half of AL iterations, then drop to fine_tune_lr
             # class HalfwayStepLRScheduler:
