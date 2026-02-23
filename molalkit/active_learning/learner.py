@@ -320,31 +320,25 @@ class ActiveLearner:
                 "`overwrite=True`."
             )
         store = self.__dict__.copy()
-        # Temporarily remove unpicklable attributes, then restore after pickling.
+        # Null out unpicklable attrs (TrainArgs, logger, cbp file handles), pickle, then restore.
         saved_states = []
         for model in store["models"]:
             state = {}
-            # Chemprop TrainArgs/PredictArgs are unpicklable, transform into dict.
             if hasattr(model, "chemprop_train_args"):
                 model.chemprop_train_args = model.chemprop_train_args.as_dict()
                 model.chemprop_predict_args = model.chemprop_predict_args.as_dict()
-            # Logger contains FileHandler with TextIOWrapper (unpicklable).
             state['logger'] = getattr(model, 'logger', None)
             model.logger = None
-            # CBP trainer has unpicklable attributes.
             cbp_trainer = getattr(model, 'cbp_trainer', None)
             if cbp_trainer is not None:
-                # cbp_trainer.args is the same TrainArgs reference (unpicklable).
                 state['cbp_args'] = getattr(cbp_trainer, 'args', None)
                 cbp_trainer.args = None
-                # cbp_logger.log_file is a TextIOWrapper (unpicklable).
                 cbp_logger = getattr(cbp_trainer, 'cbp_logger', None)
                 if cbp_logger is not None:
                     state['cbp_log_file'] = getattr(cbp_logger, 'log_file', None)
                     cbp_logger.log_file = None
             saved_states.append(state)
         pickle.dump(store, open(f_al, "wb"), protocol=4)
-        # Restore all attributes after pickling.
         for model, state in zip(store["models"], saved_states):
             if hasattr(model, "chemprop_train_args"):
                 from chemprop.args import TrainArgs, PredictArgs
@@ -363,20 +357,16 @@ class ActiveLearner:
     def load(cls, path, filename="al.pkl"):
         f_al = os.path.join(path, filename)
         store = pickle.load(open(f_al, "rb"))
-        # Restore unpicklable attributes.
+        # Reconstruct unpicklable attrs that were nulled during save.
         for model in store["models"]:
-            # Transform Chemprop TrainArgs/PredictArgs from dict back to objects.
             if hasattr(model, "chemprop_train_args"):
                 from chemprop.args import TrainArgs, PredictArgs
                 model.chemprop_train_args = TrainArgs().from_dict(model.chemprop_train_args, skip_unsettable=True)
                 model.chemprop_predict_args = PredictArgs().from_dict(model.chemprop_predict_args, skip_unsettable=True)
-            # Restore cbp_trainer references that were nulled during save.
             cbp_trainer = getattr(model, 'cbp_trainer', None)
             if cbp_trainer is not None:
-                # Restore args reference to the reconstructed TrainArgs.
                 if hasattr(model, 'chemprop_train_args'):
                     cbp_trainer.args = model.chemprop_train_args
-                # Reopen cbp_logger log file.
                 cbp_logger = getattr(cbp_trainer, 'cbp_logger', None)
                 if cbp_logger is not None and hasattr(cbp_logger, '_open_log_file'):
                     try:

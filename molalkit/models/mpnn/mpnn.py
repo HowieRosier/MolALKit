@@ -171,8 +171,7 @@ class MPNN:
         else:
             features_scaler = None
 
-        # Initialize scaler and scale training targets by subtracting mean and dividing standard deviation (
-        # regression only)
+        # Scale training targets (regression only)
         if args.dataset_type == "regression":
             debug("Fitting scaler")
             scaler = train_data.normalize_targets()
@@ -213,10 +212,9 @@ class MPNN:
             makedirs(save_dir)
             writer = None
             if self.continuous_fit and len(self.models) == args.ensemble_size:
-                debug(f"Loading model {model_idx} that fitted at previous iteration")
+                debug(f"Loading model {model_idx} from previous iteration")
                 model = self.models[model_idx]
             else:
-                # Build model from scratch (checkpoint loading should be done via load_checkpoint() before fit)
                 debug(f"Building model {model_idx} from scratch")
                 model = MoleculeModel(args)
                 if args.cuda:
@@ -243,7 +241,6 @@ class MPNN:
             cbp_log_dir = None
 
             if args.cbp:
-                # Define cbp_log_dir for both new and reused cases
                 cbp_log_dir = os.path.join(save_dir, 'cbp_logs')
 
                 if self.cbp_trainer is None:
@@ -422,7 +419,6 @@ class MPNN:
             save_checkpoint(checkpoint_path, model, scaler, features_scaler, None, None, args)
             debug(f"Checkpoint saved to {checkpoint_path}")
 
-            # Save CBP optimizer state separately (for full training state recovery)
             if args.cbp and cbp_trainer:
                 cbp_state_path = os.path.join(save_dir, 'cbp_state.pth')
                 cbp_state = {
@@ -432,8 +428,6 @@ class MPNN:
                 torch.save(cbp_state, cbp_state_path)
                 debug(f"CBP optimizer state saved to {cbp_state_path}")
 
-        # Clean up any remaining pending CBP state entries that were not consumed
-        # This happens when cbp_trainer was reused (already existed) instead of being created
         if hasattr(self, '_pending_cbp_state') and self._pending_cbp_state:
             debug(f"Cleaning up {len(self._pending_cbp_state)} unused pending CBP state entries")
             self._pending_cbp_state.clear()
@@ -467,11 +461,7 @@ class MPNN:
                 print(f"✅ CBP optimizer state saved to {cbp_state_path}")
 
     def load_checkpoint(self):
-        """Load checkpoints for all ensemble models if they exist.
-
-        Returns:
-            tuple: (success: bool, iteration: int) - success status and last saved iteration number
-        """
+        """Load checkpoints for all ensemble models. Returns (success, last_iteration)."""
         args = self.chemprop_train_args
         models = []
         scalers = []
@@ -484,12 +474,10 @@ class MPNN:
 
             if os.path.exists(checkpoint_path):
                 try:
-                    # Load checkpoint which includes model and scalers
                     state = torch.load(checkpoint_path, map_location=args.device, weights_only=False)
                     model = load_checkpoint(checkpoint_path, args.device)
                     models.append(model)
 
-                    # Extract scalers from checkpoint if available
                     scaler = state.get('data_scaler', None)
                     features_scaler = state.get('features_scaler', None)
                     scalers.append((scaler, features_scaler, None, None))
@@ -497,13 +485,11 @@ class MPNN:
                     loaded_count += 1
                     print(f"✅ Loaded checkpoint for model {model_idx} from {checkpoint_path}")
 
-                    # Load CBP optimizer state if available
                     cbp_state_path = os.path.join(save_dir, 'cbp_state.pth')
                     if args.cbp and os.path.exists(cbp_state_path):
                         cbp_state = torch.load(cbp_state_path, map_location=args.device, weights_only=False)
                         last_iteration = cbp_state.get('iteration', 0)
 
-                        # Store CBP state for later restoration after CBP trainer is created
                         if not hasattr(self, '_pending_cbp_state'):
                             self._pending_cbp_state = {}
                         self._pending_cbp_state[model_idx] = cbp_state
@@ -524,34 +510,13 @@ class MPNN:
         return False, 0
 
     def close_cbp_trainer(self):
-        """Close the CBP trainer and save final statistics when all iterations are complete."""
         if self.cbp_trainer and self.cbp_trainer.cbp_logger:
             print("📊 Saving final CBP training summary...")
             self.cbp_trainer.save_cbp_summary()
             self.cbp_trainer = None
 
     def predict(self, pred_data, batch_size: int = 10000):
-        """
-        Generate predictions for input data using trained models.
-        
-        Parameters
-        ----------
-        pred_data : MoleculeDataset
-            Dataset containing molecules to make predictions on. Must be preprocessed
-            in the same way as the training data.
-        
-        batch_size : int, optional (default=100000)
-            Number of molecules to process in each batch. Controls memory usage
-            during prediction. Larger values process data faster but require more memory.
-            
-        Returns
-        -------
-        np.ndarray
-            Array of shape (n_molecules,) containing model predictions for each molecule.
-        
-        np.ndarray
-            Array of shape (n_molecules,) containing uncertainty estimates for each prediction.
-        """
+        """Return (predictions, uncertainties) arrays for pred_data."""
         args = self.chemprop_predict_args
         train_args = self.chemprop_train_args
         num_tasks = train_args.num_tasks
@@ -562,12 +527,9 @@ class MPNN:
         if train_args.features_scaling:
             pred_data.normalize_features(self.scalers[0][0])
 
-        # Initialize arrays to store predictions and uncertainties
         all_preds = []
         all_uncs = []
-        # Calculate total number of batches
         total_batches = (len(pred_data) + batch_size - 1) // batch_size
-        # Process data in chunks of 100,000
         for i in range(total_batches):
             models = (model for model in self.models)
             scalers = (scaler for scaler in self.scalers)
