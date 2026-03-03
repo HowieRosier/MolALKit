@@ -601,12 +601,29 @@ class LearningArgs(DatasetModelArgs, SelectorArgs, ForgetterArgs, EvaluationArgs
                         top_uidx.append(data.uidx)
             else:
                 assert 0. < self.top_k < 1., "top_k must be in (0, 1)."
-                n_top_k = math.ceil(self.top_k * (len(self.datasets_train[0]) + len(self.datasets_pool[0])))
-                y_AL = self.datasets_train[0].y.ravel().tolist() + self.datasets_pool[0].y.ravel().tolist()
-                top_k_index = get_topn_idx(y_AL, n_top_k, target=self.s_exploitive_target)
-                for i, data in enumerate(self.datasets_train[0].data + self.datasets_pool[0].data):
-                    if i in top_k_index:
-                        top_uidx.append(data.uidx)
+                y_AL = np.array(
+                    self.datasets_train[0].y.ravel().tolist() + self.datasets_pool[0].y.ravel().tolist()
+                )
+                all_data = self.datasets_train[0].data + self.datasets_pool[0].data
+                # Use percentile threshold for deterministic, reproducible TopSet definition.
+                # This avoids random tie-breaking when multiple molecules share the boundary value.
+                if self.s_exploitive_target == "min":
+                    threshold = np.percentile(y_AL, self.top_k * 100)
+                    for i, data in enumerate(all_data):
+                        if y_AL[i] <= threshold:
+                            top_uidx.append(data.uidx)
+                elif self.s_exploitive_target == "max":
+                    threshold = np.percentile(y_AL, 100 - self.top_k * 100)
+                    for i, data in enumerate(all_data):
+                        if y_AL[i] >= threshold:
+                            top_uidx.append(data.uidx)
+                else:
+                    target_val = float(self.s_exploitive_target)
+                    distances = np.abs(y_AL - target_val)
+                    dist_threshold = np.percentile(distances, self.top_k * 100)
+                    for i, data in enumerate(all_data):
+                        if distances[i] <= dist_threshold:
+                            top_uidx.append(data.uidx)
             return top_uidx
         else:
             return None
